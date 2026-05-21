@@ -1,15 +1,4 @@
 //! Random-move scramble generation in WCA notation.
-//!
-//! A scramble is a sequence of moves separated by single spaces. Each move is a
-//! *move type* (a face letter plus an optional layer-width prefix/suffix, e.g.
-//! `R`, `Rw`, `3Rw`) followed by one of the three suffixes `` (none), `'`, `2`,
-//! chosen uniformly.
-//!
-//! Legality rules enforced while generating (see `INTERFACES.md`):
-//!   1. Consecutive moves must not use the same face letter with the same width.
-//!   2. No three consecutive moves on the same axis (axes: U/D, L/R, F/B).
-//!   3. If move[i] and move[i-1] share an axis, move[i] must not repeat
-//!      move[i-2]'s face+width.
 
 use crate::types::Puzzle;
 use rand::Rng;
@@ -66,17 +55,17 @@ const R3W: MoveType = MoveType::new("3Rw", b'R', 3);
 const F3W: MoveType = MoveType::new("3Fw", b'F', 3);
 const B3W: MoveType = MoveType::new("3Bw", b'B', 3);
 
-/// 2x2: outer faces U, R, F only.
+/// 2x2: outer faces U, R, F only, because a 1-of-2 turn is half the cube.
 const POOL_2: &[MoveType] = &[U, R, F];
 /// 3x3: the six outer faces.
 const POOL_3: &[MoveType] = &[U, D, L, R, F, B];
-/// 4x4: six outer faces + Uw Rw Fw.
+/// 4x4: six outer faces + Uw Rw Fw, because a 2-of-4 turn is half the cube.
 const POOL_4: &[MoveType] = &[U, D, L, R, F, B, UW, RW, FW];
-/// 5x5: six outer faces + all six wide moves.
+/// 5x5: six outer faces + all six wide moves, since 2 of 5 is never half.
 const POOL_5: &[MoveType] = &[U, D, L, R, F, B, UW, DW, LW, RW, FW, BW];
-/// 6x6: 5x5 pool + 3Uw 3Rw 3Fw.
+/// 6x6: 5x5 pool + 3Uw 3Rw 3Fw, because a 3-of-6 turn is half the cube.
 const POOL_6: &[MoveType] = &[U, D, L, R, F, B, UW, DW, LW, RW, FW, BW, U3W, R3W, F3W];
-/// 7x7: 5x5 pool + all six triple-wide moves.
+/// 7x7: 5x5 pool + all six triple-wides, since neither 2 nor 3 of 7 is half.
 const POOL_7: &[MoveType] = &[
     U, D, L, R, F, B, UW, DW, LW, RW, FW, BW, U3W, D3W, L3W, R3W, F3W, B3W,
 ];
@@ -95,10 +84,10 @@ fn pool(puzzle: Puzzle) -> &'static [MoveType] {
     }
 }
 
-/// Number of moves to generate. 2x2 is 9-11 (random), everything else is fixed.
-fn move_count<R: Rng>(puzzle: Puzzle, rng: &mut R) -> usize {
+/// Number of moves to generate, matching what TNoodle emits for each event.
+fn move_count(puzzle: Puzzle) -> usize {
     match puzzle {
-        Puzzle::Cube2 => rng.gen_range(9..=11),
+        Puzzle::Cube2 => 11,
         Puzzle::Cube3 => 20,
         Puzzle::Cube4 => 44,
         Puzzle::Cube5 => 60,
@@ -107,62 +96,36 @@ fn move_count<R: Rng>(puzzle: Puzzle, rng: &mut R) -> usize {
     }
 }
 
-/// Whether `candidate` may follow `prev` (the immediately preceding move type)
-/// and `prev2` (the one before that).
-fn is_legal(candidate: MoveType, prev: Option<MoveType>, prev2: Option<MoveType>) -> bool {
-    let prev = match prev {
-        Some(p) => p,
-        // First move: anything goes.
-        None => return true,
-    };
-
-    // Rule 1: no same face letter + same width twice in a row.
-    if candidate.same_layer(prev) {
-        return false;
-    }
-
-    if candidate.axis() != prev.axis() {
-        return true;
-    }
-
-    if let Some(prev2) = prev2 {
-        // Rule 2: no three consecutive moves on the same axis.
-        if prev2.axis() == candidate.axis() {
-            return false;
+/// Whether `candidate` may follow `run`, the trailing block of same-axis moves.
+fn is_legal(candidate: MoveType, run: &[MoveType]) -> bool {
+    match run.first() {
+        Some(first) if first.axis() == candidate.axis() => {
+            !run.iter().any(|m| m.same_layer(candidate))
         }
-        // Rule 3: sharing an axis with the previous move forbids repeating
-        // move[i-2]'s face+width.
-        if candidate.same_layer(prev2) {
-            return false;
-        }
+        // A move on a fresh axis starts a new block and is always legal.
+        _ => true,
     }
-
-    true
 }
 
 /// Random-move scramble in WCA notation, moves separated by single spaces.
-///
-/// Uses [`rand::thread_rng`].
 pub fn generate(puzzle: Puzzle) -> String {
     let mut rng = rand::thread_rng();
     generate_with_rng(puzzle, &mut rng)
 }
 
-/// Random-move scramble in WCA notation, moves separated by single spaces,
-/// drawing randomness from `rng` (deterministic for a seeded generator).
+/// The same scramble, drawing randomness from `rng` so a seed always repeats.
 pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
     let pool = pool(puzzle);
-    let count = move_count(puzzle, rng);
+    let count = move_count(puzzle);
 
     let mut out = String::with_capacity(count * 4);
     let mut candidates: Vec<MoveType> = Vec::with_capacity(pool.len());
-    let mut prev: Option<MoveType> = None;
-    let mut prev2: Option<MoveType> = None;
+    let mut run: Vec<MoveType> = Vec::with_capacity(pool.len());
 
     for i in 0..count {
         candidates.clear();
-        candidates.extend(pool.iter().copied().filter(|m| is_legal(*m, prev, prev2)));
-        // Every supported pool always leaves at least one legal continuation.
+        candidates.extend(pool.iter().copied().filter(|m| is_legal(*m, &run)));
+        // Every pool spans at least two axes, so a legal move always exists.
         debug_assert!(!candidates.is_empty());
         if candidates.is_empty() {
             break;
@@ -177,8 +140,10 @@ pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
         out.push_str(chosen.name);
         out.push_str(suffix);
 
-        prev2 = prev;
-        prev = Some(chosen);
+        if run.first().is_some_and(|m| m.axis() != chosen.axis()) {
+            run.clear();
+        }
+        run.push(chosen);
     }
 
     out
@@ -195,8 +160,7 @@ mod tests {
         if let Some(base) = token.strip_suffix('\'') {
             (base, "'")
         } else if let Some(base) = token.strip_suffix('2') {
-            // Careful: "2" is never part of a move-type name in our pools
-            // (the only digit-prefixed names are "3Xw").
+            // Safe because no move-type name ends in a digit.
             (base, "2")
         } else {
             (token, "")
@@ -207,8 +171,7 @@ mod tests {
         POOL_7.iter().copied().find(|m| m.name == name)
     }
 
-    /// Decode a scramble into its move types, asserting notation validity along
-    /// the way, and asserting every move comes from `pool`.
+    /// Decode a scramble into move types, asserting notation and pool validity.
     fn decode(scramble: &str, pool: &[MoveType]) -> Vec<MoveType> {
         assert!(!scramble.is_empty(), "scramble must not be empty");
         assert!(
@@ -225,8 +188,8 @@ mod tests {
                     SUFFIXES.contains(&suffix),
                     "bad suffix in token {token:?} of {scramble:?}"
                 );
-                let mv = lookup(name)
-                    .unwrap_or_else(|| panic!("unknown move {name:?} in {scramble:?}"));
+                let mv =
+                    lookup(name).unwrap_or_else(|| panic!("unknown move {name:?} in {scramble:?}"));
                 assert!(
                     pool.contains(&mv),
                     "move {name:?} is outside this puzzle's pool ({scramble:?})"
@@ -236,55 +199,54 @@ mod tests {
             .collect()
     }
 
-    /// Assert rules 1-3 hold across the whole sequence.
+    /// The trailing run of same-axis moves ending at `end` (exclusive).
+    fn trailing_run(moves: &[MoveType], end: usize) -> &[MoveType] {
+        let axis = match moves.get(end.wrapping_sub(1)) {
+            Some(m) => m.axis(),
+            None => return &[],
+        };
+        let mut start = end;
+        while start > 0 && moves[start - 1].axis() == axis {
+            start -= 1;
+        }
+        &moves[start..end]
+    }
+
+    /// Assert no face+width repeats inside any block of same-axis moves.
     fn assert_constraints(moves: &[MoveType], scramble: &str) {
         for i in 1..moves.len() {
-            // Rule 1.
+            let run = trailing_run(moves, i);
             assert!(
-                !moves[i].same_layer(moves[i - 1]),
-                "rule 1 violated at index {i} in {scramble:?}"
+                is_legal(moves[i], run),
+                "illegal move at index {i} in {scramble:?}"
             );
-        }
-        for i in 2..moves.len() {
-            // Rule 2.
-            assert!(
-                !(moves[i].axis() == moves[i - 1].axis() && moves[i].axis() == moves[i - 2].axis()),
-                "rule 2 violated at index {i} in {scramble:?}"
-            );
-            // Rule 3.
-            if moves[i].axis() == moves[i - 1].axis() {
-                assert!(
-                    !moves[i].same_layer(moves[i - 2]),
-                    "rule 3 violated at index {i} in {scramble:?}"
-                );
-            }
         }
     }
 
-    fn expected_len(puzzle: Puzzle) -> (usize, usize) {
+    fn expected_len(puzzle: Puzzle) -> usize {
         match puzzle {
-            Puzzle::Cube2 => (9, 11),
-            Puzzle::Cube3 => (20, 20),
-            Puzzle::Cube4 => (44, 44),
-            Puzzle::Cube5 => (60, 60),
-            Puzzle::Cube6 => (80, 80),
-            Puzzle::Cube7 => (100, 100),
+            Puzzle::Cube2 => 11,
+            Puzzle::Cube3 => 20,
+            Puzzle::Cube4 => 44,
+            Puzzle::Cube5 => 60,
+            Puzzle::Cube6 => 80,
+            Puzzle::Cube7 => 100,
         }
     }
 
     #[test]
     fn lengths_pool_and_constraints_hold_over_many_generations() {
         for puzzle in Puzzle::ALL {
-            let (lo, hi) = expected_len(puzzle);
+            let want = expected_len(puzzle);
             for seed in 0..400u64 {
                 let mut rng = StdRng::seed_from_u64(seed);
                 let scramble = generate_with_rng(puzzle, &mut rng);
                 let moves = decode(&scramble, pool(puzzle));
-                assert!(
-                    moves.len() >= lo && moves.len() <= hi,
-                    "{} produced {} moves (expected {lo}..={hi}): {scramble:?}",
-                    puzzle.name(),
-                    moves.len()
+                assert_eq!(
+                    moves.len(),
+                    want,
+                    "{} produced the wrong move count: {scramble:?}",
+                    puzzle.name()
                 );
                 assert_constraints(&moves, &scramble);
             }
@@ -292,16 +254,17 @@ mod tests {
     }
 
     #[test]
-    fn two_by_two_length_varies_within_nine_to_eleven() {
-        let mut seen = [false; 3]; // 9, 10, 11
+    fn two_by_two_is_always_eleven_moves_of_u_r_f() {
         for seed in 0..200u64 {
             let mut rng = StdRng::seed_from_u64(seed);
             let scramble = generate_with_rng(Puzzle::Cube2, &mut rng);
-            let n = scramble.split(' ').count();
-            assert!((9..=11).contains(&n), "unexpected 2x2 length {n}");
-            seen[n - 9] = true;
+            let moves = decode(&scramble, POOL_2);
+            assert_eq!(
+                moves.len(),
+                11,
+                "2x2 must be exactly 11 moves: {scramble:?}"
+            );
         }
-        assert!(seen.iter().all(|s| *s), "2x2 never produced all of 9/10/11");
     }
 
     #[test]
@@ -371,27 +334,43 @@ mod tests {
         for puzzle in Puzzle::ALL {
             let scramble = generate(puzzle);
             let moves = decode(&scramble, pool(puzzle));
-            let (lo, hi) = expected_len(puzzle);
-            assert!(moves.len() >= lo && moves.len() <= hi);
+            assert_eq!(moves.len(), expected_len(puzzle));
             assert_constraints(&moves, &scramble);
         }
     }
 
     #[test]
     fn legality_predicate_rejects_illegal_sequences() {
-        // Rule 1: same face + same width back to back.
-        assert!(!is_legal(R, Some(R), None));
-        assert!(!is_legal(RW, Some(RW), Some(U)));
-        // Different width on the same face is a distinct move type (rule 1 only).
-        assert!(is_legal(RW, Some(R), None));
-        // Opposite face on the same axis is fine as a pair.
-        assert!(is_legal(L, Some(R), Some(U)));
-        // Rule 2: three in a row on the L/R axis.
-        assert!(!is_legal(RW, Some(L), Some(R)));
-        assert!(!is_legal(L, Some(R), Some(LW)));
-        // Different axis is always fine after rule 1 passes.
-        assert!(is_legal(U, Some(R), Some(U)));
-        // First and second moves are unconstrained beyond rule 1.
-        assert!(is_legal(U, None, None));
+        // No repeated face+width inside a block of same-axis moves.
+        assert!(!is_legal(R, &[R]));
+        assert!(!is_legal(RW, &[RW]));
+        assert!(!is_legal(R, &[R, L]));
+        // Different widths on one face are distinct move types.
+        assert!(is_legal(RW, &[R]));
+        // Opposite faces on one axis are fine.
+        assert!(is_legal(L, &[R]));
+        // A fresh axis clears the block, so a repeat is legal again.
+        assert!(is_legal(R, &[U]));
+        // Three same-axis moves are legal when all three layers differ.
+        assert!(is_legal(U3W, &[UW, U]));
+        // The first move of a scramble is unconstrained.
+        assert!(is_legal(U, &[]));
+    }
+
+    #[test]
+    fn big_cubes_do_produce_runs_of_three_on_one_axis() {
+        let mut seen = false;
+        for seed in 0..200u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let scramble = generate_with_rng(Puzzle::Cube7, &mut rng);
+            let moves = decode(&scramble, POOL_7);
+            seen |= moves
+                .windows(3)
+                .any(|w| w[0].axis() == w[1].axis() && w[1].axis() == w[2].axis());
+            if seen {
+                break;
+            }
+        }
+        assert!(seen, "TNoodle allows same-axis runs longer than two");
     }
 }

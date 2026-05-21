@@ -1,8 +1,4 @@
-//! Core application state machine: timer flow, key handling and `/commands`.
-//!
-//! `ui.rs` renders purely from the fields of [`App`]; every value it needs is
-//! refreshed here (in [`App::on_tick`] or on state transitions) so the renderer
-//! never has to touch [`Instant`].
+//! Timer state machine, key handling and `/commands`; `ui.rs` renders only from [`App`] fields refreshed here.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -11,12 +7,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::scramble;
 use crate::storage;
-use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve};
+use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve, FIRST_USER_ID};
 
 /// How long space must be held before releasing it starts the timer.
 const ARM_THRESHOLD: Duration = Duration::from_millis(300);
-/// After a solve is finalized, space cannot begin a new interaction for this
-/// long (csTimer-style guard against bounced keys / instant re-triggers).
+/// After a solve, space is ignored this long (csTimer-style guard against bounced keys).
 const STOP_COOLDOWN: Duration = Duration::from_millis(300);
 /// Inspection length in seconds.
 const INSPECTION_SECS: i64 = 15;
@@ -60,15 +55,11 @@ pub struct App {
     pub data_path: PathBuf,
 
     // --- internal bookkeeping (not part of the ui.rs contract) ---
-    /// Start of the current inspection, kept while `Armed { from_inspection: true }`
-    /// so an aborted arm can restore the original countdown.
+    /// Inspection start, kept while armed so an aborted arm restores the countdown.
     inspection_start: Option<Instant>,
-    /// A key that is completely inert until the user physically lets go of it:
-    /// every further Press (Windows auto-repeat resends Press, not Repeat) and
-    /// the final Release are dropped. Set when a key press stops the timer.
+    /// Key that stopped the timer: inert until its Release (Windows auto-repeat resends Press, not Repeat).
     inert_key: Option<KeyCode>,
-    /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN`
-    /// after that moment.
+    /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN` after it.
     stopped_at: Option<Instant>,
 }
 
@@ -104,26 +95,35 @@ impl App {
         }
     }
 
-    /// Guarantee the invariants the rest of the app relies on: at least one
-    /// session exists, the active id points at a real session, and
-    /// `next_session_id` will not collide with an existing id.
+    /// Restore invariants: the six defaults exist, they sort first, the active id is real, `next_session_id` is free.
+    ///
+    /// Structural repair only, for a hand-edited or truncated file. Reading an older format is
+    /// `storage::load`'s job, and by the time this runs the file is already at the current version.
     fn sanitize(save: &mut SaveFile) {
-        if save.sessions.is_empty() {
-            save.sessions.push(Session {
-                id: 1,
-                name: "default".to_string(),
-                puzzle: Puzzle::Cube3,
-                solves: Vec::new(),
-                created_at: storage::now_millis(),
-            });
-            save.active_session_id = 1;
+        for puzzle in Puzzle::DEFAULT_ORDER {
+            if !save
+                .sessions
+                .iter()
+                .any(|s| s.id == puzzle.default_session_id())
+            {
+                save.sessions.push(Session::default_for(puzzle));
+            }
         }
-        let max_id = save.sessions.iter().map(|s| s.id).max().unwrap_or(0);
-        if save.next_session_id <= max_id {
-            save.next_session_id = max_id + 1;
+        save.sessions.sort_by_key(|s| s.id);
+
+        // The next id must clear every id in use and the whole reserved range below `FIRST_USER_ID`.
+        let floor = save
+            .sessions
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .unwrap_or(0)
+            .max(FIRST_USER_ID - 1);
+        if save.next_session_id <= floor {
+            save.next_session_id = floor.saturating_add(1);
         }
         if !save.sessions.iter().any(|s| s.id == save.active_session_id) {
-            save.active_session_id = save.sessions[0].id;
+            save.active_session_id = Puzzle::Cube3.default_session_id();
         }
     }
 
@@ -224,8 +224,7 @@ impl App {
         self.status_msg = None;
     }
 
-    /// Finish the running solve: record it, persist, and go back to Idle with a
-    /// fresh scramble.
+    /// Record the running solve, persist, and return to Idle with a fresh scramble.
     fn finish_solve(&mut self, started: Instant) {
         let millis = started.elapsed().as_millis() as u64;
         let solve = Solve {
@@ -294,8 +293,7 @@ impl App {
             return;
         }
 
-        // Timing: ANY key press stops the timer, and that key then goes inert
-        // until it is released.
+        // While timing, any key press stops the timer and that key goes inert.
         if let TimerState::Timing { started } = self.state {
             if key.kind == KeyEventKind::Press {
                 self.inert_key = Some(key.code);
@@ -313,10 +311,7 @@ impl App {
             return;
         }
 
-        // The key that stopped the timer stays dead until the user lets go of
-        // it: Windows console auto-repeat keeps delivering *Press* events while
-        // it is held, and those must not re-arm or restart inspection. Only its
-        // Release clears the block; other keys are unaffected.
+        // Windows auto-repeat keeps sending Press while held, so only Release clears the block.
         if self.inert_key == Some(key.code) {
             if key.kind == KeyEventKind::Release {
                 self.inert_key = None;
@@ -331,9 +326,7 @@ impl App {
             return;
         }
 
-        // Post-solve cooldown: even a clean release + fresh tap should not
-        // instantly start the next attempt. Only space is held off; commands,
-        // scrolling and `q` keep working.
+        // Post-solve cooldown holds off space only; commands, scrolling and `q` keep working.
         if key.code == KeyCode::Char(' ') && self.in_stop_cooldown() {
             return;
         }
@@ -486,6 +479,7 @@ impl App {
             "sessions" => self.cmd_list_sessions(),
             "session" => self.cmd_switch_session(rest),
             "rename" => self.cmd_rename(rest),
+            "delsession" => self.cmd_delete_session(rest),
             "del" | "delete" => self.cmd_delete_last(),
             "dnf" => self.cmd_set_penalty(Penalty::Dnf),
             "+2" => self.cmd_set_penalty(Penalty::Plus2),
@@ -504,9 +498,9 @@ impl App {
     }
 
     fn cmd_switch_puzzle(&mut self, puzzle: Puzzle) {
-        // An empty session isn't committed to anything yet: retype it in place
-        // so a session doesn't stay stuck with the puzzle it was created for.
-        if self.current_session().solves.is_empty() {
+        // An empty session someone created themselves isn't committed to a puzzle yet: retype it in place.
+        let current = self.current_session();
+        if !current.is_default() && current.solves.is_empty() {
             let session = self.current_session_mut();
             session.puzzle = puzzle;
             let name = session.name.clone();
@@ -516,22 +510,8 @@ impl App {
             return;
         }
 
-        // A session with solves keeps its puzzle (stats must never mix), so
-        // jump to the most recently *created* session of that puzzle instead
-        // (id breaks ties).
-        let target = self
-            .save
-            .sessions
-            .iter()
-            .filter(|s| s.puzzle == puzzle)
-            .max_by_key(|s| (s.created_at, s.id))
-            .map(|s| s.id);
-
-        let id = match target {
-            Some(id) => id,
-            None => self.push_session("default".to_string(), puzzle),
-        };
-        self.save.active_session_id = id;
+        // Otherwise navigate, never retype: the puzzle's permanent default is always the destination.
+        self.save.active_session_id = puzzle.default_session_id();
         self.new_scramble();
         let name = self.current_session().name.clone();
         self.status(format!("{} · session: {}", puzzle.name(), name));
@@ -617,6 +597,10 @@ impl App {
     }
 
     fn cmd_rename(&mut self, rest: &str) {
+        if self.current_session().is_default() {
+            self.status("default sessions cannot be renamed");
+            return;
+        }
         if rest.is_empty() {
             self.status("usage: /rename <name>");
             return;
@@ -624,6 +608,37 @@ impl App {
         let name = rest.to_string();
         self.current_session_mut().name = name.clone();
         self.status(format!("renamed session to {}", name));
+        self.save_now();
+    }
+
+    /// Delete a whole session and its solves. No argument means the one you are in.
+    fn cmd_delete_session(&mut self, rest: &str) {
+        let id = if rest.is_empty() {
+            self.save.active_session_id
+        } else {
+            match rest.trim().parse::<u64>() {
+                Ok(id) => id,
+                Err(_) => {
+                    self.status(format!("not a session id: {}", rest));
+                    return;
+                }
+            }
+        };
+        let Some(index) = self.save.sessions.iter().position(|s| s.id == id) else {
+            self.status(format!("no session with id {}", id));
+            return;
+        };
+        if self.save.sessions[index].is_default() {
+            self.status("default sessions cannot be deleted");
+            return;
+        }
+
+        let removed = self.save.sessions.remove(index);
+        if self.save.active_session_id == removed.id {
+            self.save.active_session_id = removed.puzzle.default_session_id();
+            self.new_scramble();
+        }
+        self.status(format!("deleted session: {} (#{})", removed.name, removed.id));
         self.save_now();
     }
 
@@ -668,9 +683,7 @@ mod tests {
 
     const SPACE: KeyCode = KeyCode::Char(' ');
 
-    /// A unique path under the system temp dir that cleans itself up on drop.
-    /// Tests must never touch the user's real save file, so every `App` built
-    /// here is pointed at one of these.
+    /// A unique self-deleting temp path, so tests never touch the real save file.
     struct TempPath {
         path: PathBuf,
     }
@@ -701,8 +714,7 @@ mod tests {
         }
     }
 
-    /// An app whose `data_path` lives in the temp dir. Keep the guard alive for
-    /// the whole test; it deletes the file when the test ends.
+    /// An app writing to a temp path; keep the guard alive for the whole test.
     fn test_app(tag: &str) -> (App, TempPath) {
         test_app_with(tag, SaveFile::default())
     }
@@ -731,7 +743,7 @@ mod tests {
         }
     }
 
-    /// An `Instant` in the past — how tests simulate elapsed time without sleeping.
+    /// An `Instant` in the past: how tests simulate elapsed time without sleeping.
     fn ago(d: Duration) -> Instant {
         Instant::now()
             .checked_sub(d)
@@ -762,8 +774,7 @@ mod tests {
         });
     }
 
-    /// Drive Idle -> Timing with inspection off, backdating the arm so the
-    /// release counts as "held long enough".
+    /// Drive Idle -> Timing, backdating the arm so the release counts as held.
     fn start_timing_now(app: &mut App) {
         app.inspection_enabled = false;
         app.on_key(press(SPACE));
@@ -1118,8 +1129,7 @@ mod tests {
             "the release that ended the stopping press must not start inspection"
         );
 
-        // Once the key is released and the cooldown has passed, the *next*
-        // space press/release pair works normally again.
+        // After the release and the cooldown, the next space pair works normally.
         app.stopped_at = Some(ago(STOP_COOLDOWN + ms(50)));
         app.on_key(press(SPACE));
         app.on_key(release(SPACE));
@@ -1137,8 +1147,7 @@ mod tests {
         app.on_key(press(SPACE));
         assert_eq!(app.state, TimerState::Idle);
 
-        // Windows keyboard auto-repeat keeps sending *Press* (not Repeat)
-        // events for as long as the key is held down.
+        // Windows auto-repeat sends Press (not Repeat) while the key is held.
         for _ in 0..8 {
             app.on_key(press(SPACE));
             assert_eq!(app.state, TimerState::Idle, "auto-repeat must not arm");
@@ -1304,22 +1313,24 @@ mod tests {
     }
 
     #[test]
-    fn puzzle_commands_switch_puzzle_and_session() {
+    fn puzzle_commands_navigate_to_the_puzzles_default_session() {
         let (mut app, _g) = test_app("cmd-puzzle");
-        // A session that already has solves is pinned to its puzzle, so /NxN
-        // jumps to another session instead of retyping this one.
-        add_solve(&mut app, 12_000);
         let before = app.scramble.clone();
-        assert_eq!(app.current_session().puzzle, Puzzle::Cube3);
+        assert_eq!(app.current_session().id, 1, "a fresh file starts on 3x3");
 
         run_command(&mut app, "3x3");
-        assert_eq!(app.current_session().id, 1, "already on a 3x3 session");
+        assert_eq!(app.current_session().id, 1, "already on the 3x3 default");
         assert_ne!(app.scramble, before, "a puzzle switch re-scrambles");
 
         run_command(&mut app, "2x2");
+        assert_eq!(app.current_session().id, Puzzle::Cube2.default_session_id());
         assert_eq!(app.current_session().puzzle, Puzzle::Cube2);
         assert_eq!(app.current_session().name, "default");
-        assert_eq!(app.save.sessions.len(), 2, "a 2x2 session was created");
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len(),
+            "navigation never creates a session"
+        );
         let moves = app.scramble.split_whitespace().count();
         assert!(
             (9..=11).contains(&moves),
@@ -1328,39 +1339,60 @@ mod tests {
         );
         assert_eq!(app.status_msg.as_deref(), Some("2x2 · session: default"));
 
-        let two_by_two_id = app.current_session().id;
-        add_solve(&mut app, 3_000); // pin the 2x2 session to 2x2 as well
+        run_command(&mut app, "7x7");
+        assert_eq!(app.current_session().id, Puzzle::Cube7.default_session_id());
+
+        let loaded = storage::load(&app.data_path).expect("switching persists");
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(loaded.active_session_id, Puzzle::Cube7.default_session_id());
+    }
+
+    #[test]
+    fn a_puzzle_command_goes_to_the_default_not_the_newest_session() {
+        let (mut app, _g) = test_app("cmd-puzzle-default-wins");
+        run_command(&mut app, "2x2");
+        run_command(&mut app, "new mini");
+        let mini = app.current_session().id;
+        assert_eq!(mini, FIRST_USER_ID, "user sessions start at 7");
+        add_solve(&mut app, 3_000);
+
+        // Leaving a user session that has solves lands on the target puzzle's default.
         run_command(&mut app, "3x3");
-        assert_eq!(app.current_session().id, 1, "back to the 3x3 session");
-        assert_eq!(app.save.sessions.len(), 2, "no extra session created");
+        assert_eq!(app.current_session().id, 1);
+        let kept = app
+            .save
+            .sessions
+            .iter()
+            .find(|s| s.id == mini)
+            .expect("mini");
+        assert_eq!(kept.solves.len(), 1, "the session it left keeps its solves");
+        assert_eq!(kept.puzzle, Puzzle::Cube2, "and its puzzle");
 
         run_command(&mut app, "2x2");
         assert_eq!(
             app.current_session().id,
-            two_by_two_id,
-            "the existing 2x2 session is reused"
+            Puzzle::Cube2.default_session_id(),
+            "the 2x2 default wins over the newer 2x2 session"
         );
-
-        let loaded = storage::load(&app.data_path).expect("switching persists");
-        assert_eq!(loaded.sessions.len(), 2);
-        assert_eq!(loaded.active_session_id, two_by_two_id);
     }
 
     #[test]
-    fn a_puzzle_command_retypes_an_empty_session_in_place() {
+    fn a_puzzle_command_retypes_an_empty_user_session_in_place() {
         let (mut app, _g) = test_app("cmd-puzzle-retype");
+        run_command(&mut app, "new evening");
         let id = app.current_session().id;
+        let count = app.save.sessions.len();
         assert!(app.current_session().solves.is_empty());
 
         run_command(&mut app, "6x6");
 
-        assert_eq!(app.save.sessions.len(), 1, "no new session is created");
+        assert_eq!(app.save.sessions.len(), count, "no new session is created");
         assert_eq!(app.current_session().id, id, "same session, new puzzle");
-        assert_eq!(app.current_session().name, "default", "name is kept");
+        assert_eq!(app.current_session().name, "evening", "name is kept");
         assert_eq!(app.current_session().puzzle, Puzzle::Cube6);
         assert_eq!(
             app.status_msg.as_deref(),
-            Some("session 'default' is now 6x6")
+            Some("session 'evening' is now 6x6")
         );
 
         // The fresh scramble comes from the 6x6 pool.
@@ -1375,39 +1407,107 @@ mod tests {
         }
 
         let loaded = storage::load(&app.data_path).expect("retyping persists");
-        assert_eq!(loaded.sessions.len(), 1);
-        assert_eq!(loaded.sessions[0].id, id);
-        assert_eq!(loaded.sessions[0].puzzle, Puzzle::Cube6);
+        let session = loaded
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .expect("the retyped session survives");
+        assert_eq!(session.puzzle, Puzzle::Cube6);
     }
 
     #[test]
-    fn a_puzzle_command_never_retypes_a_session_with_solves() {
-        let (mut app, _g) = test_app("cmd-puzzle-pinned");
-        add_solve(&mut app, 12_000);
+    fn a_puzzle_command_never_retypes_a_default_session() {
+        let (mut app, _g) = test_app("cmd-puzzle-default-pinned");
+        assert!(app.current_session().solves.is_empty());
 
+        // Empty or not, a default session is navigated away from, never retyped.
         run_command(&mut app, "6x6");
-
-        assert_eq!(app.save.sessions.len(), 2, "a 6x6 session is created");
-        assert_eq!(
-            app.save.sessions[0].puzzle,
-            Puzzle::Cube3,
-            "the session with solves keeps its puzzle"
-        );
-        assert_eq!(app.save.sessions[0].solves.len(), 1, "and keeps its solves");
-        assert_eq!(app.save.sessions[0].name, "default");
-        let six_id = app.current_session().id;
-        assert_ne!(six_id, 1);
-        assert_eq!(app.current_session().puzzle, Puzzle::Cube6);
-        assert_eq!(app.current_session().name, "default");
+        assert_eq!(app.save.sessions[0].puzzle, Puzzle::Cube3);
+        assert_eq!(app.current_session().id, Puzzle::Cube6.default_session_id());
         assert_eq!(app.status_msg.as_deref(), Some("6x6 · session: default"));
 
-        // Once the 6x6 session has solves too, switching just hops between them.
-        add_solve(&mut app, 180_000);
         run_command(&mut app, "3x3");
-        assert_eq!(app.current_session().id, 1);
+        add_solve(&mut app, 12_000);
         run_command(&mut app, "6x6");
-        assert_eq!(app.current_session().id, six_id);
-        assert_eq!(app.save.sessions.len(), 2, "no further sessions created");
+        assert_eq!(app.save.sessions[0].puzzle, Puzzle::Cube3, "puzzle kept");
+        assert_eq!(app.save.sessions[0].solves.len(), 1, "solves kept");
+        assert_eq!(app.current_session().id, Puzzle::Cube6.default_session_id());
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len(),
+            "no session was created along the way"
+        );
+    }
+
+    #[test]
+    fn delsession_refuses_the_default_sessions() {
+        let (mut app, _g) = test_app("cmd-delsession-default");
+        run_command(&mut app, "delsession");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("default sessions cannot be deleted")
+        );
+
+        run_command(&mut app, "delsession 6");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("default sessions cannot be deleted")
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+    }
+
+    #[test]
+    fn delsession_rejects_unknown_and_malformed_ids() {
+        let (mut app, _g) = test_app("cmd-delsession-bad");
+        run_command(&mut app, "delsession 99");
+        assert_eq!(app.status_msg.as_deref(), Some("no session with id 99"));
+
+        run_command(&mut app, "delsession abc");
+        assert_eq!(app.status_msg.as_deref(), Some("not a session id: abc"));
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+    }
+
+    #[test]
+    fn delsession_removes_a_user_session_and_its_solves() {
+        let (mut app, _g) = test_app("cmd-delsession");
+        run_command(&mut app, "new evening");
+        let id = app.current_session().id;
+        add_solve(&mut app, 12_000);
+        run_command(&mut app, "session 1");
+
+        run_command(&mut app, &format!("delsession {}", id));
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some(format!("deleted session: evening (#{})", id).as_str())
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(app.save.active_session_id, 1, "the active session is untouched");
+
+        let loaded = storage::load(&app.data_path).expect("deletion persists");
+        assert!(!loaded.sessions.iter().any(|s| s.id == id));
+    }
+
+    #[test]
+    fn deleting_the_active_session_falls_back_to_the_puzzle_default() {
+        let (mut app, _g) = test_app("cmd-delsession-active");
+        run_command(&mut app, "5x5");
+        run_command(&mut app, "new evening");
+        add_solve(&mut app, 60_000);
+        let before = app.scramble.clone();
+
+        run_command(&mut app, "delsession");
+
+        assert_eq!(
+            app.save.active_session_id,
+            Puzzle::Cube5.default_session_id()
+        );
+        assert_eq!(app.current_session().puzzle, Puzzle::Cube5);
+        assert!(app.current_session().solves.is_empty());
+        assert_ne!(app.scramble, before, "landing somewhere else re-scrambles");
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+
+        let loaded = storage::load(&app.data_path).expect("deletion persists");
+        assert_eq!(loaded.active_session_id, Puzzle::Cube5.default_session_id());
     }
 
     #[test]
@@ -1416,25 +1516,26 @@ mod tests {
         add_solve(&mut app, 1_000);
 
         run_command(&mut app, "new");
-        assert_eq!(app.save.sessions.len(), 2);
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+        assert_eq!(app.current_session().id, FIRST_USER_ID, "user ids start at 7");
         assert_eq!(app.current_session().name, "session 2");
         assert_eq!(app.current_session().puzzle, Puzzle::Cube3);
         assert!(app.current_session().solves.is_empty());
-        assert_ne!(app.save.active_session_id, 1);
+        assert!(!app.current_session().is_default());
 
         run_command(&mut app, "new one-handed");
-        assert_eq!(app.save.sessions.len(), 3);
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 2);
         assert_eq!(app.current_session().name, "one-handed");
+        assert_eq!(app.current_session().id, FIRST_USER_ID + 1);
 
         let loaded = storage::load(&app.data_path).expect("new session persists");
-        assert_eq!(loaded.sessions.len(), 3);
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 2);
     }
 
     #[test]
     fn session_switches_by_id_and_rejects_bad_input() {
         let (mut app, _g) = test_app("cmd-session");
-        // With a solve recorded, /2x2 forks a second session instead of
-        // retyping this one.
+        // With a solve recorded, /2x2 forks a second session instead of retyping.
         add_solve(&mut app, 9_000);
         run_command(&mut app, "2x2");
         let two = app.current_session().id;
@@ -1472,6 +1573,9 @@ mod tests {
     #[test]
     fn rename_renames_the_current_session() {
         let (mut app, _g) = test_app("cmd-rename");
+        run_command(&mut app, "new");
+        let id = app.current_session().id;
+
         run_command(&mut app, "rename evening practice");
         assert_eq!(app.current_session().name, "evening practice");
         assert_eq!(
@@ -1484,7 +1588,30 @@ mod tests {
         assert_eq!(app.current_session().name, "evening practice");
 
         let loaded = storage::load(&app.data_path).expect("rename persists");
-        assert_eq!(loaded.sessions[0].name, "evening practice");
+        let session = loaded
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .expect("session");
+        assert_eq!(session.name, "evening practice");
+    }
+
+    #[test]
+    fn rename_refuses_a_default_session() {
+        let (mut app, _g) = test_app("cmd-rename-default");
+        run_command(&mut app, "rename evening practice");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("default sessions cannot be renamed")
+        );
+        assert_eq!(app.current_session().name, "default");
+
+        // The refusal comes before the usage line: the name is not the problem.
+        run_command(&mut app, "rename");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("default sessions cannot be renamed")
+        );
     }
 
     #[test]
@@ -1689,42 +1816,64 @@ mod tests {
     #[test]
     fn new_repairs_a_broken_save_file() {
         let broken = SaveFile {
-            version: 1,
             next_session_id: 1,
             sessions: Vec::new(),
             active_session_id: 42,
+            ..SaveFile::default()
         };
         let (app, _g) = test_app_with("ctor-empty", broken);
-        assert_eq!(app.save.sessions.len(), 1);
-        assert_eq!(app.save.active_session_id, app.save.sessions[0].id);
-        assert!(app.save.next_session_id > app.save.sessions[0].id);
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(app.save.active_session_id, 1);
+        assert_eq!(app.save.next_session_id, FIRST_USER_ID);
         assert_eq!(app.state, TimerState::Idle);
         assert!(!app.inspection_enabled, "inspection defaults to off");
         assert!(!app.scramble.is_empty());
     }
 
     #[test]
-    fn new_picks_up_the_active_sessions_puzzle_for_the_first_scramble() {
+    fn new_restores_the_six_defaults_and_keeps_user_sessions() {
         let save = SaveFile {
-            version: 1,
-            next_session_id: 3,
+            next_session_id: 2,
             sessions: vec![
+                Session {
+                    id: 12,
+                    name: "evening".to_string(),
+                    puzzle: Puzzle::Cube4,
+                    solves: Vec::new(),
+                    created_at: 1,
+                },
                 Session {
                     id: 1,
                     name: "default".to_string(),
                     puzzle: Puzzle::Cube3,
-                    solves: Vec::new(),
+                    solves: vec![Solve {
+                        millis: 9_000,
+                        penalty: Penalty::None,
+                        scramble: "R U".to_string(),
+                        timestamp: 1,
+                    }],
                     created_at: 0,
                 },
-                Session {
-                    id: 2,
-                    name: "mini".to_string(),
-                    puzzle: Puzzle::Cube2,
-                    solves: Vec::new(),
-                    created_at: 1,
-                },
             ],
-            active_session_id: 2,
+            active_session_id: 99,
+            ..SaveFile::default()
+        };
+        let (app, _g) = test_app_with("ctor-defaults", save);
+
+        let ids: Vec<u64> = app.save.sessions.iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 12], "defaults exist and sort first");
+        assert_eq!(app.save.sessions[0].solves.len(), 1, "existing solves survive");
+        assert_eq!(app.save.sessions[3].puzzle, Puzzle::Cube5, "id 4 is the 5x5 default");
+        assert_eq!(app.save.sessions[6].name, "evening");
+        assert_eq!(app.save.next_session_id, 13, "past every id in use");
+        assert_eq!(app.save.active_session_id, 1, "a dangling active id falls back to 3x3");
+    }
+
+    #[test]
+    fn new_picks_up_the_active_sessions_puzzle_for_the_first_scramble() {
+        let save = SaveFile {
+            active_session_id: Puzzle::Cube2.default_session_id(),
+            ..SaveFile::default()
         };
         let (app, _g) = test_app_with("ctor-puzzle", save);
         assert_eq!(app.current_session().puzzle, Puzzle::Cube2);
