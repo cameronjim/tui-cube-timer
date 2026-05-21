@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Save-file format this build writes. `storage::load` migrates anything older and refuses anything newer.
+pub const SAVE_VERSION: u32 = 2;
+/// First id a user-created session can take: ids 1 through 6 are the permanent per-puzzle defaults.
+pub const FIRST_USER_ID: u64 = 7;
+
 /// The puzzle events the timer supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Puzzle {
@@ -28,6 +33,28 @@ impl Puzzle {
         Puzzle::Cube6,
         Puzzle::Cube7,
     ];
+
+    /// The puzzles in default-session order, so `DEFAULT_ORDER[n]` owns id `n + 1`.
+    pub const DEFAULT_ORDER: [Puzzle; 6] = [
+        Puzzle::Cube3,
+        Puzzle::Cube2,
+        Puzzle::Cube4,
+        Puzzle::Cube5,
+        Puzzle::Cube6,
+        Puzzle::Cube7,
+    ];
+
+    /// Fixed id of this puzzle's permanent default session. 3x3 comes first because it is the common case.
+    pub fn default_session_id(self) -> u64 {
+        match self {
+            Puzzle::Cube3 => 1,
+            Puzzle::Cube2 => 2,
+            Puzzle::Cube4 => 3,
+            Puzzle::Cube5 => 4,
+            Puzzle::Cube6 => 5,
+            Puzzle::Cube7 => 6,
+        }
+    }
 
     /// Display / command name: "2x2", "3x3", ...
     pub fn name(self) -> &'static str {
@@ -98,12 +125,31 @@ pub struct Session {
     pub created_at: u64,
 }
 
+impl Session {
+    /// The permanent default session for a puzzle: its fixed id, the name "default", no solves.
+    pub fn default_for(puzzle: Puzzle) -> Session {
+        Session {
+            id: puzzle.default_session_id(),
+            name: "default".to_string(),
+            puzzle,
+            solves: Vec::new(),
+            created_at: 0,
+        }
+    }
+
+    /// True for the six permanent defaults, which can never be deleted, renamed or retyped.
+    pub fn is_default(&self) -> bool {
+        self.id < FIRST_USER_ID
+    }
+}
+
 /// Root of the persisted data file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveFile {
     pub version: u32,
-    /// Monotonic counter for session ids.
+    /// Monotonic counter for session ids, never below [`FIRST_USER_ID`].
     pub next_session_id: u64,
+    /// Every session, the six permanent defaults (ids 1 through 6) first.
     pub sessions: Vec<Session>,
     /// Id of the session that was active when the app last ran.
     pub active_session_id: u64,
@@ -112,16 +158,13 @@ pub struct SaveFile {
 impl Default for SaveFile {
     fn default() -> Self {
         SaveFile {
-            version: 1,
-            next_session_id: 2,
-            sessions: vec![Session {
-                id: 1,
-                name: "default".to_string(),
-                puzzle: Puzzle::Cube3,
-                solves: Vec::new(),
-                created_at: 0,
-            }],
-            active_session_id: 1,
+            version: SAVE_VERSION,
+            next_session_id: FIRST_USER_ID,
+            sessions: Puzzle::DEFAULT_ORDER
+                .into_iter()
+                .map(Session::default_for)
+                .collect(),
+            active_session_id: Puzzle::Cube3.default_session_id(),
         }
     }
 }

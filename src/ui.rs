@@ -503,6 +503,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("/sessions", "list all sessions"),
         help_row("/session <id>", "switch to session by id"),
         help_row("/rename <name>", "rename the current session"),
+        help_row("/delsession", "delete a session by id (default: current)"),
         help_row("/del", "delete the last solve"),
         help_row("/dnf  /+2  /ok", "set the last solve's penalty"),
         help_row("/inspect", "toggle 15s inspection (off by default)"),

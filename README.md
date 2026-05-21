@@ -105,11 +105,12 @@ spaces do not matter.
 
 | Command | What it does |
 |---|---|
-| `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch puzzle (see below) |
+| `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch to that puzzle's default session (see below) |
 | `/new [name]` | start a new session for the current puzzle |
 | `/sessions` | list every session with its id, puzzle and solve count |
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
+| `/delsession [id]` | delete a session and its solves, current one by default |
 | `/dnf` `/+2` `/ok` | set or clear the penalty on your last solve |
 | `/del` | delete your last solve |
 | `/inspect` | turn 15 second inspection on or off |
@@ -119,20 +120,33 @@ spaces do not matter.
 ## Sessions and puzzles
 
 A session is just an ordered list of solves for one puzzle, with a name and an
-id. You start with one called `default` on 3x3, and `/new` gives you as many
-more as you want. Without a name, new sessions are numbered for you.
+id. Every save file has six permanent ones called `default`, one per puzzle:
+3x3 is id 1, then 2x2, 4x4, 5x5, 6x6 and 7x7 as ids 2 to 6. Their solves are
+yours to penalise and delete as usual, but the sessions themselves cannot be
+renamed, retyped or deleted, so `/4x4` always has somewhere to land. `/new`
+gives you as many sessions of your own as you want, with ids from 7 up, and
+without a name they are numbered for you.
+
+A save file written by an older Cubetimer is brought up to this layout when it
+is read: the old `default` session keeps its solves and becomes the default for
+its puzzle, and anything else you had made keeps its name and times under a new
+id.
 
 Puzzle switching is built around one rule: a session that has solves in it never
-changes puzzle, because that would mix two events into one set of stats. So if
-your current session is still empty, a command like `/4x4` simply retypes it in
-place and you keep the name you gave it. If it already has solves, Cubetimer
-leaves it alone and takes you to your most recent 4x4 session instead, creating
-one if you have never done a 4x4 solve before. Either way you land on a fresh
-scramble for the new puzzle.
+changes puzzle, because that would mix two events into one set of stats. So
+`/4x4` takes you to the 4x4 default session, and that is the whole story unless
+you are sitting in an empty session you made yourself, in which case Cubetimer
+retypes that session in place and you keep the name you gave it. Either way you
+land on a fresh scramble for the new puzzle.
 
-Because switching hops between sessions rather than editing them, going back and
-forth between `/3x3` and `/4x4` all evening will keep dropping you into the same
-two sessions rather than piling up new ones.
+Because the destination is a fixed session rather than whichever one you made
+most recently, going back and forth between `/3x3` and `/4x4` all evening drops
+you in the same two places every time.
+
+`/delsession` throws a session away along with its solves. With no argument it
+takes the one you are in, and with an id it takes that one, so you can clear out
+a session without switching to it first. Deleting the session you are in leaves
+you on the default for its puzzle. The six defaults are refused.
 
 ## Where your times live
 
