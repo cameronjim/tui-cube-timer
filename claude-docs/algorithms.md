@@ -1,7 +1,7 @@
 # Cubetimer algorithms
 
 This document covers the maths Cubetimer implements: WCA trimmed averages, rolling bests
-and personal bests (`src/stats.rs`), scramble generation (`src/scramble.rs`), and the
+and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`), and the
 inspection penalty thresholds (`src/app.rs`). Every claim here describes the code as it
 stands, including the places where Cubetimer approximates the official rules rather than
 matching them.
@@ -168,10 +168,18 @@ instead of nothing. If no window ever produced a time, the answer is `None`.
 
 Note that this calls `average_window` directly rather than `average_of`, so each window is
 averaged on its own terms; the "last n solves" tail logic does not apply. Complexity is
-`O((L - n + 1) · n log n)` for `L` solves, dominated by re-sorting each window. For an
-ao100 over a few thousand solves that is a handful of milliseconds, recomputed once per
-frame, and it has never been worth caching. If a session ever grows large enough to matter,
-the fix is memoisation keyed on solve count, not a cleverer sort.
+`O((L - n + 1) · n log n)` for `L` solves, dominated by re-sorting each window, and
+`personal_bests` pays it once per session of the puzzle.
+
+That cost is why the result is cached on `App` rather than computed in the renderer.
+An earlier version called `personal_bests` from `draw`, which put an unbounded walk over
+every solve the user has ever done inside a loop that runs every 15 ms; a large enough save
+file made the frame budget the binding constraint and the app unresponsive. `App::stats`
+and `App::pbs` now hold the answers and `App::refresh_derived` recomputes them at the
+handful of moments a number can change, which is at most once per solve. See
+[architecture.md](architecture.md) for where those calls sit. If a session ever grows large
+enough that even that is slow, the fix is memoisation keyed on solve count, not a cleverer
+sort.
 
 `session_stats` bundles what the stats strip needs, all in one pass over the effective
 times: `count` (including DNFs), `valid_count` (excluding them), `best` and `worst` as the
@@ -193,8 +201,8 @@ for session in sessions {
 Two properties are worth stating explicitly. **Rolling windows never span a session
 boundary**, because `best_average_of` is called once per session; five solves spread across
 two sessions do not form an ao5. **Filtering by puzzle is the caller's job.** `stats.rs`
-takes whatever slice it is handed. `ui::puzzle_sessions` supplies only the sessions
-matching the active session's puzzle, which is what makes the displayed PBs event-specific.
+takes whatever slice it is handed. `App::refresh_derived` supplies only the sessions
+matching the active session's puzzle, which is what makes the cached PBs event-specific.
 Combined with the puzzle-retype rule in [architecture.md](architecture.md), which prevents
 a session that already has solves from changing puzzle, this guarantees no personal best
 ever mixes events.
@@ -203,9 +211,50 @@ ever mixes events.
 
 ## Scramble generation
 
-`scramble::generate(puzzle)` returns a space-separated string of moves in WCA notation.
-`generate_with_rng(puzzle, rng)` is the same function with an injectable generator, which
-is how the tests get reproducible scrambles from `StdRng::seed_from_u64`.
+`scramble::generate(puzzle)` returns a scramble in WCA notation. `generate_with_rng(puzzle,
+rng)` is the same function with an injectable generator, which is how the tests get
+reproducible scrambles from `StdRng::seed_from_u64`. `mod.rs` does nothing but match on
+`Puzzle` and hand off; each family lives in its own file, because the eleven events share
+no notation and almost no structure. Every generator is a `fn scramble<R: Rng>(rng: &mut R)
+-> String` and every one is total, meaning no retry loops and no path that can fail.
+
+Two things are true across all of them. The output is a single string, space separated,
+with no leading or trailing whitespace; Megaminx is the only one that contains a newline.
+And every scramble is a fixed length for its event, so nothing about the move count is
+randomised.
+
+### How close each event is to official
+
+TNoodle, the official WCA scramble program, uses two methods. **Random-state** generation
+samples a position uniformly from all reachable states and runs a solver backwards to
+produce moves for it. **Random-move** generation samples a sequence and takes whatever
+state falls out. Where TNoodle uses random-move, matching its emission rules is enough to
+be equivalent. Where it uses random-state, a random-move generator is an approximation, and
+saying otherwise would be dishonest.
+
+| Event | TNoodle | Cubetimer | Verdict |
+| --- | --- | --- | --- |
+| Clock | random-state | random-move | **Exact.** Clock's moves commute, so uniform amounts already give a uniform state |
+| Megaminx | random-move | random-move | **Emission-identical.** Same distribution, only the PRNG differs |
+| 5x5, 6x6, 7x7 | random-move | random-move | **Equivalent.** Same pools, lengths and legality rule |
+| 2x2, 3x3, 4x4 | random-state | random-move | Approximation |
+| Pyraminx, Skewb | random-state | random-move | Approximation |
+| Square-1 | random-state | random-move, shape-aware | Approximation, close |
+
+The three approximation rows are covered in detail at the end of their own sections. The
+general shape of the gap is the same in each case: the state distribution is not uniform,
+because some positions are reachable by many more legal sequences than others, so a
+random-move scramble can occasionally land somewhere far easier than typical. These are
+good practice scrambles and they are what most cubers train on. They are not
+competition-legal, and closing the gap would mean shipping a solver and pruning tables per
+puzzle, which is a large amount of machinery for a terminal timer. The trade-off is
+deliberate.
+
+---
+
+## Cubes: 2x2 through 7x7
+
+`src/scramble/cube.rs`.
 
 ### The move model
 
@@ -289,7 +338,7 @@ What this rule deliberately does *not* forbid is a long same-axis run. `Uw U 3Uw
 consecutive moves on the U/D axis, all on distinct layers, nothing cancels, and real WCA
 scrambles contain sequences exactly like it. An earlier version of this generator capped
 same-axis runs at two, which is stricter than TNoodle and skewed the distribution on the big
-cubes; `big_cubes_do_produce_runs_of_three_on_one_axis` in `scramble.rs` now pins the
+cubes; `big_cubes_do_produce_runs_of_three_on_one_axis` in `cube.rs` now pins the
 looser behavior down.
 
 ### Filtered sampling, not rejection sampling
@@ -316,38 +365,201 @@ on three different axes, so at most one is ever excluded. The code carries a
 `debug_assert!(!candidates.is_empty())` to catch a future pool that breaks this, plus a
 `break` so a release build truncates the scramble rather than panicking.
 
-### How close this is to official WCA scrambles
-
-The honest answer splits by cube size, because TNoodle, the official WCA scramble program,
-uses two different methods.
+### How close the cubes are to official
 
 **5x5, 6x6 and 7x7 are equivalent to official output.** TNoodle generates the big cubes as
-random-move sequences, and Cubetimer now matches it on all three inputs that define the
+random-move sequences, and Cubetimer matches it on all three inputs that define the
 generator: the same move pools, the same lengths of 60, 80 and 100, and the same legality
 rule. A scramble from Cubetimer is drawn from the same distribution as a scramble from
 TNoodle for these events. This is what the audit against TNoodle's source changed, and it is
 why the constraint rule was relaxed to the same-axis-run form.
 
-**2x2, 3x3 and 4x4 are approximations.** TNoodle generates these as **random-state**
-scrambles: a position is sampled uniformly from all reachable states of the puzzle, and a
-solver then produces a move sequence reaching it. Cubetimer instead samples a sequence and
-takes whatever state falls out. The lengths of 11, 20 and 44 are matched to what real
-TNoodle scrambles for these events look like, but matching the length does not make the
-method the same. The practical differences:
+**2x2, 3x3 and 4x4 are approximations**, because TNoodle generates them from a random
+state. The lengths of 11, 20 and 44 are matched to what real TNoodle scrambles for these
+events look like, but matching the length does not make the method the same. The bias is
+mild on 4x4 and most visible on 2x2, where the state space is tiny. One point that is easy
+to miss: Cubetimer's 11 moves on 2x2 and 20 on 3x3 are sequence lengths, not the optimal
+solution depth a random-state scramble is measured by.
 
-- **The state distribution is not uniform.** Some positions are reachable by many more
-  legal sequences than others, so they come up disproportionately often. The bias is mild on
-  4x4 and most visible on 2x2, where the state space is tiny.
-- **Difficulty can be uneven.** A random-move scramble can occasionally land on a state
-  that is far easier than typical, including, very rarely, a near-solved one. Random-state
-  generation makes that as unlikely as the state distribution says it should be.
-- **Move counts mean different things.** Cubetimer's 11 moves on 2x2 and 20 on 3x3 are
-  sequence lengths, not the optimal solution depth a random-state scramble is measured by.
+---
 
-These are good practice scrambles and they are what most cubers train on, but for 2x2
-through 4x4 they are not competition-legal. Closing that gap would mean shipping a solver
-and pruning tables per puzzle, which is a substantial amount of machinery for a terminal
-timer. The trade-off is deliberate.
+## Pyraminx
+
+`src/scramble/pyraminx.rs`. Approximation of a random-state event.
+
+A Pyraminx scramble is eleven layer turns followed by up to four tip turns.
+
+**Layer turns.** Exactly eleven, drawn from `U L R B` with an optional `'`. There is no `2`
+suffix anywhere in Pyraminx notation, because a Pyraminx layer turns 120 degrees and two of
+those is the inverse of one. The only constraint is that **no layer turns twice in a row**.
+That is weaker than a cube's rule, and deliberately so: all four Pyraminx axes intersect, so
+there are no parallel layers the way `L` is parallel to `R`, and the only redundancy to
+prune is the immediate repeat, which would collapse into a single turn and make the
+scramble shorter than eleven moves. The successor is picked by offsetting rather than
+retrying, `(prev + rng.gen_range(1..4)) % 4`, which keeps the three legal successors equally
+likely in one draw.
+
+**Tips.** The four tips are emitted after every layer turn, in the fixed order `u l r b`,
+each appearing at most once. A tip is a corner trivially rotatable in isolation, so a
+uniformly random state leaves each one solved exactly one time in three, and a solved tip
+contributes no move. The generator draws `0..3` per tip and skips on 0, giving 0 to 4 tip
+moves per scramble with the same distribution the official generator produces.
+
+This is the shape TNoodle emits: it solves a uniformly random state in exactly eleven layer
+turns, then appends one move per unsolved tip. Cubetimer reproduces the *shape* and the tip
+distribution, but samples the eleven layer turns instead of solving for them, so the layer
+state is not uniform.
+
+---
+
+## Skewb
+
+`src/scramble/skewb.rs`. Approximation of a random-state event.
+
+Exactly eleven moves drawn from `R U L B` with an optional `'`, and no `2`, since a Skewb
+turn is also 120 degrees. Those four are the fixed-corner scheme: Skewb scrambling holds one
+corner still, the same trick 2x2 uses to drop from six faces to three, so four of the eight
+corner axes reach every state and the other four never appear in notation.
+
+**The only constraint is that no axis repeats consecutively**, and there is nothing stronger
+to add. On a cube, `R` and `L` are parallel and commute, which is what makes the same-axis
+run rule necessary. No two Skewb axes are parallel, so no two moves commute, and the only
+sequence that collapses is the immediate repeat. Same successor arithmetic as Pyraminx: draw
+from the three survivors and step over the excluded index, so no successor is starved. A
+test asserts every ordered pair of distinct axes actually occurs, which guards both against
+the constraint drifting stricter than TNoodle's and against that arithmetic biasing a
+successor.
+
+TNoodle generates Skewb from a random state, rejecting anything solvable in fewer than
+seven moves and padding the result out to eleven. Cubetimer matches the length and the
+notation, not the state distribution, and has no lower bound on solution depth.
+
+---
+
+## Megaminx
+
+`src/scramble/megaminx.rs`. Emission-identical to the official generator.
+
+Megaminx uses Pochmann notation and is laid out as seven lines. Each line is ten moves
+alternating `R` and `D`, starting on `R` and ending on `D`, each carrying `++` or `--` from
+an independent coin flip, and the line is closed by a single `U`:
+
+```
+R++ D-- R-- D++ R++ D++ R-- D-- R++ D++ U
+```
+
+The closing `U` is **not an independent draw**. TNoodle reuses the direction of the line's
+last `D`, so a line ending `D++` closes with `U` and one ending `D--` closes with `U'`. The
+implementation gets this for free by letting the `clockwise` flag outlive the inner loop and
+reading it once more after it. Getting this wrong is the easiest way to produce Megaminx
+output that looks right and is not, so it is worth stating plainly: 70 moves means 70 random
+bits per scramble, not 77.
+
+Megaminx is a random-move event officially, so there is no state distribution to
+approximate. Reproducing the emission rules is the whole of what "matches the WCA scrambler"
+means here, and Cubetimer's output is drawn from the same distribution as TNoodle's. Only
+the PRNG behind it differs.
+
+This is also the generator that drove the adaptive header: seven lines joined with `\n` is
+the one scramble that does not fit a fixed-height panel. See
+[architecture.md](architecture.md).
+
+---
+
+## Square-1
+
+`src/scramble/square1.rs`. Approximation, but a shape-aware one.
+
+Square-1 notation alternates twist groups and slashes, with a space on **both** sides of
+every slash:
+
+```
+(1,0) / (-3,0) / (0,3) / ... / (6,-2)
+```
+
+Cubetimer emits a fixed 12 slashes and therefore 13 twist groups, ending on a twist. Each
+twist amount is in `-5..=6`, which covers all twelve rotations of a layer exactly once, and
+`(0,0)` is excluded because it is a no-op.
+
+### Why the generator simulates the puzzle
+
+A twist is never blocked. Each layer of a Square-1 spins freely, so any `(top,bottom)` is
+always physical. A **slash** is different: it swaps the two front halves, which is only
+possible when no corner straddles the slice plane. A generator that picked twists blindly
+would emit sequences that cannot be turned.
+
+So the generator carries a shape simulator, TNoodle's 24-slot piece model:
+
+```rust
+struct Shape { slots: [u8; 24] }
+```
+
+Slots 0 through 11 are the top layer, 12 through 23 the bottom, each slot a half-hour of the
+dial. A corner fills two adjacent slots with the same piece id and an edge fills one, so two
+neighbouring slots hold the same id exactly when a corner spans them. The slice plane cuts
+each layer between slots 11 and 0 and between slots 5 and 6, which makes the legality test
+four comparisons:
+
+```rust
+fn can_slash(self) -> bool {
+    self.slots[0] != self.slots[11]
+        && self.slots[5] != self.slots[6]
+        && self.slots[12] != self.slots[23]
+        && self.slots[17] != self.slots[18]
+}
+```
+
+`twisted` rotates each layer's slots and `slashed` swaps the two front half-layers. With
+those three operations, each step of the generator enumerates all 143 twists, keeps the ones
+whose resulting shape satisfies `can_slash`, and draws uniformly from that set. This is
+filtered sampling, the same technique the cube generator uses: uniform over the legal set,
+in fixed work per step, with no retry loop. The final twist is unconstrained, because
+nothing follows it. Every shape can be rotated into a slashable position, so the candidate
+set is never empty; a `debug_assert` catches a future change that breaks that and a `break`
+keeps a release build from panicking.
+
+### What this buys and what it does not
+
+Filtering to slashable twists has a second, non-obvious effect: it makes the twist amounts
+**deliberately non-uniform**. Amounts of 0, ±3 and 6 dominate the output, because those are
+the rotations most likely to leave the slice plane clear. That is not a defect to be
+corrected. Real WCA Square-1 scrambles show the same skew, for the same reason, and a
+generator that forced uniform amounts would produce output visibly unlike the real thing.
+
+The gap to official is narrower here than for the other approximations. TNoodle generates
+Square-1 from a random state and emits a variable 9 to 13 slashes; Cubetimer's 12 is
+TNoodle's median. Every scramble Cubetimer emits is turnable and reaches a genuinely
+scrambled shape, so the resulting states are close to uniform without being exactly
+uniform.
+
+---
+
+## Clock
+
+`src/scramble/clock.rs`. **Exactly official.**
+
+A Clock scramble is exactly fifteen space-separated tokens, in exactly this order:
+
+```
+UR DR DL UL U R D L ALL y2 U R D L ALL
+```
+
+Nine front dials, the `y2` flip, then five back dials. Each dial carries an amount drawn
+uniformly from twelve values, rendered `0+` through `6+` clockwise and `1-` through `5-`
+anticlockwise. Note the asymmetry, which is correct and not a bug: TNoodle draws
+`nextInt(12) - 5`, giving `-5..=6`, and calls every non-negative amount clockwise. So `0-`
+never appears in an official scramble, and `6+` has no negative twin.
+
+There are **no pin tokens**. The WCA removed pin states from official Clock scrambles on
+1 January 2024, so a scramble ending in something like `UUdd` is pre-2024 output and
+Cubetimer does not produce it.
+
+Clock is the one event where a random-move generator is not an approximation. Its dial
+turns commute: turning `UR` by 3 and then `DL` by 2 reaches the same state as doing them in
+the other order, and every reachable state corresponds to exactly one assignment of amounts
+to dials. Drawing each amount independently and uniformly therefore samples the state space
+uniformly, which is precisely what random-state generation means. Cubetimer's Clock
+scrambles are official scrambles, not an equivalent of them.
 
 ---
 

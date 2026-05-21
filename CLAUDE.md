@@ -1,10 +1,11 @@
 # Cubetimer
 
-Cubetimer is a speedcube timer that runs in the terminal: random-move scrambles in WCA
-notation for 2x2 through 7x7, optional 15 second inspection, ao5/ao12/ao100, personal
-bests and sessions persisted as JSON. It is written in Rust on top of ratatui and
-crossterm, and it is Windows-first, because the hold-and-release timer flow depends on
-key release events that the Windows console delivers natively.
+Cubetimer is a speedcube timer that runs in the terminal: scrambles in WCA notation for
+eleven events (2x2 through 7x7, Pyraminx, Skewb, Megaminx, Square-1, Clock), optional 15
+second inspection, ao5/ao12/ao100, personal bests and sessions persisted as JSON. It is
+written in Rust on top of ratatui and crossterm, and it is Windows-first, because the
+hold-and-release timer flow depends on key release events that the Windows console
+delivers natively.
 
 Read this file first, then the guide you need:
 
@@ -30,18 +31,32 @@ single jobs:
 |---|---|
 | `main.rs` | Process lifecycle and the event loop: load, init terminal, poll, draw, restore, final save |
 | `app.rs` | State machine: timer states, key handling, `/commands`, and the derived fields the UI reads |
-| `ui.rs` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
-| `scramble.rs` | Random-move scramble generation in WCA notation |
+| `ui/` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
+| `scramble/` | Scramble generation in WCA notation, one generator per puzzle family |
 | `stats.rs` | Pure statistics: trimmed averages, session summaries, personal bests |
 | `storage.rs` | Where the save file lives, and reading and writing it atomically |
 | `types.rs` | Shared vocabulary and the serde shape of the persisted file |
 
-No module reaches around another's API. `ui.rs` reads `App` fields and never touches
-`Instant` or the filesystem. `app.rs` is the only caller of `storage::save`. Nothing
-outside `storage.rs` decides where data lives. Files stay small: past roughly 500 lines of
-non-test code, split along responsibility lines rather than appending. `app.rs` (about 660
-non-test lines) and `ui.rs` (about 555) are already at that line, so treat any further
-growth there as a prompt to split.
+Two of those are directories, each split along its own internal seam:
+
+| File | Responsibility |
+|---|---|
+| `ui/mod.rs` | `draw` and every widget |
+| `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
+| `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
+| `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |
+
+No module reaches around another's API. `ui` reads `App` fields and never touches
+`Instant`, the filesystem, or `stats` (statistics are cached on `App` by `refresh_derived`
+because recomputing them in the 15 ms draw loop can hang on a large save file). `app.rs` is
+the only caller of `storage::save`. Nothing outside `storage.rs` decides where data lives.
+
+Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
+rather than appending. `app.rs` is at about 765 non-test lines and is over the line now.
+The next split is save-file structural repair (`sanitize`, `dedupe_ids`,
+`evict_misfiled_defaults`, `free_next_id`, `take_id`) moving out of `app.rs`; the
+`// ----- command mode` seam is the one after that. `ui/mod.rs` (about 515) is at the line,
+so treat further growth there as a prompt to split again.
 
 **3. Comments are single-line, always.** Never `/* */` blocks. Use `///` doc comments on
 items and `//!` at the top of a module, first letter capitalized. Use sparse `//` inline
@@ -65,6 +80,14 @@ disks. Adding a field means giving it `#[serde(default)]`. Renaming, removing or
 one means bumping `SaveFile.version` and writing the migration in the same change.
 `storage::load` deliberately refuses to parse a file it does not understand rather than
 overwrite it, so a careless schema edit locks people out of their own times.
+
+`SAVE_VERSION` is 3 and `load` migrates v1 -> v2 -> v3 as a chain, one step per bump. Each
+step is written against constants frozen at that version (`V2_DEFAULT_ORDER`,
+`V2_FIRST_USER_ID`, `V3_ID_SHIFT`), never against `Puzzle::DEFAULT_ORDER` or
+`FIRST_USER_ID`, because a migration describes a historical format and must not change
+meaning when a new event is added. Reserved session ids 1 through 11 are also part of the
+contract: a new event takes the next free id and needs a migration shifting user ids past
+it, exactly as v3 did.
 
 ## Before you call a change done
 
