@@ -1,8 +1,4 @@
-//! Core application state machine: timer flow, key handling and `/commands`.
-//!
-//! `ui.rs` renders purely from the fields of [`App`]; every value it needs is
-//! refreshed here (in [`App::on_tick`] or on state transitions) so the renderer
-//! never has to touch [`Instant`].
+//! Timer state machine, key handling and `/commands`; `ui.rs` renders only from [`App`] fields refreshed here.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -15,8 +11,7 @@ use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve};
 
 /// How long space must be held before releasing it starts the timer.
 const ARM_THRESHOLD: Duration = Duration::from_millis(300);
-/// After a solve is finalized, space cannot begin a new interaction for this
-/// long (csTimer-style guard against bounced keys / instant re-triggers).
+/// After a solve, space is ignored this long (csTimer-style guard against bounced keys).
 const STOP_COOLDOWN: Duration = Duration::from_millis(300);
 /// Inspection length in seconds.
 const INSPECTION_SECS: i64 = 15;
@@ -60,15 +55,11 @@ pub struct App {
     pub data_path: PathBuf,
 
     // --- internal bookkeeping (not part of the ui.rs contract) ---
-    /// Start of the current inspection, kept while `Armed { from_inspection: true }`
-    /// so an aborted arm can restore the original countdown.
+    /// Inspection start, kept while armed so an aborted arm restores the countdown.
     inspection_start: Option<Instant>,
-    /// A key that is completely inert until the user physically lets go of it:
-    /// every further Press (Windows auto-repeat resends Press, not Repeat) and
-    /// the final Release are dropped. Set when a key press stops the timer.
+    /// Key that stopped the timer: inert until its Release (Windows auto-repeat resends Press, not Repeat).
     inert_key: Option<KeyCode>,
-    /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN`
-    /// after that moment.
+    /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN` after it.
     stopped_at: Option<Instant>,
 }
 
@@ -104,9 +95,7 @@ impl App {
         }
     }
 
-    /// Guarantee the invariants the rest of the app relies on: at least one
-    /// session exists, the active id points at a real session, and
-    /// `next_session_id` will not collide with an existing id.
+    /// Restore invariants: a session exists, the active id is real, `next_session_id` is free.
     fn sanitize(save: &mut SaveFile) {
         if save.sessions.is_empty() {
             save.sessions.push(Session {
@@ -224,8 +213,7 @@ impl App {
         self.status_msg = None;
     }
 
-    /// Finish the running solve: record it, persist, and go back to Idle with a
-    /// fresh scramble.
+    /// Record the running solve, persist, and return to Idle with a fresh scramble.
     fn finish_solve(&mut self, started: Instant) {
         let millis = started.elapsed().as_millis() as u64;
         let solve = Solve {
@@ -294,8 +282,7 @@ impl App {
             return;
         }
 
-        // Timing: ANY key press stops the timer, and that key then goes inert
-        // until it is released.
+        // While timing, any key press stops the timer and that key goes inert.
         if let TimerState::Timing { started } = self.state {
             if key.kind == KeyEventKind::Press {
                 self.inert_key = Some(key.code);
@@ -313,10 +300,7 @@ impl App {
             return;
         }
 
-        // The key that stopped the timer stays dead until the user lets go of
-        // it: Windows console auto-repeat keeps delivering *Press* events while
-        // it is held, and those must not re-arm or restart inspection. Only its
-        // Release clears the block; other keys are unaffected.
+        // Windows auto-repeat keeps sending Press while held, so only Release clears the block.
         if self.inert_key == Some(key.code) {
             if key.kind == KeyEventKind::Release {
                 self.inert_key = None;
@@ -331,9 +315,7 @@ impl App {
             return;
         }
 
-        // Post-solve cooldown: even a clean release + fresh tap should not
-        // instantly start the next attempt. Only space is held off; commands,
-        // scrolling and `q` keep working.
+        // Post-solve cooldown holds off space only; commands, scrolling and `q` keep working.
         if key.code == KeyCode::Char(' ') && self.in_stop_cooldown() {
             return;
         }
@@ -504,8 +486,7 @@ impl App {
     }
 
     fn cmd_switch_puzzle(&mut self, puzzle: Puzzle) {
-        // An empty session isn't committed to anything yet: retype it in place
-        // so a session doesn't stay stuck with the puzzle it was created for.
+        // An empty session isn't committed to a puzzle yet: retype it in place.
         if self.current_session().solves.is_empty() {
             let session = self.current_session_mut();
             session.puzzle = puzzle;
@@ -516,9 +497,7 @@ impl App {
             return;
         }
 
-        // A session with solves keeps its puzzle (stats must never mix), so
-        // jump to the most recently *created* session of that puzzle instead
-        // (id breaks ties).
+        // A session with solves keeps its puzzle (stats must never mix): jump to the newest one instead.
         let target = self
             .save
             .sessions
@@ -668,9 +647,7 @@ mod tests {
 
     const SPACE: KeyCode = KeyCode::Char(' ');
 
-    /// A unique path under the system temp dir that cleans itself up on drop.
-    /// Tests must never touch the user's real save file, so every `App` built
-    /// here is pointed at one of these.
+    /// A unique self-deleting temp path, so tests never touch the real save file.
     struct TempPath {
         path: PathBuf,
     }
@@ -701,8 +678,7 @@ mod tests {
         }
     }
 
-    /// An app whose `data_path` lives in the temp dir. Keep the guard alive for
-    /// the whole test; it deletes the file when the test ends.
+    /// An app writing to a temp path; keep the guard alive for the whole test.
     fn test_app(tag: &str) -> (App, TempPath) {
         test_app_with(tag, SaveFile::default())
     }
@@ -731,7 +707,7 @@ mod tests {
         }
     }
 
-    /// An `Instant` in the past — how tests simulate elapsed time without sleeping.
+    /// An `Instant` in the past: how tests simulate elapsed time without sleeping.
     fn ago(d: Duration) -> Instant {
         Instant::now()
             .checked_sub(d)
@@ -762,8 +738,7 @@ mod tests {
         });
     }
 
-    /// Drive Idle -> Timing with inspection off, backdating the arm so the
-    /// release counts as "held long enough".
+    /// Drive Idle -> Timing, backdating the arm so the release counts as held.
     fn start_timing_now(app: &mut App) {
         app.inspection_enabled = false;
         app.on_key(press(SPACE));
@@ -1118,8 +1093,7 @@ mod tests {
             "the release that ended the stopping press must not start inspection"
         );
 
-        // Once the key is released and the cooldown has passed, the *next*
-        // space press/release pair works normally again.
+        // After the release and the cooldown, the next space pair works normally.
         app.stopped_at = Some(ago(STOP_COOLDOWN + ms(50)));
         app.on_key(press(SPACE));
         app.on_key(release(SPACE));
@@ -1137,8 +1111,7 @@ mod tests {
         app.on_key(press(SPACE));
         assert_eq!(app.state, TimerState::Idle);
 
-        // Windows keyboard auto-repeat keeps sending *Press* (not Repeat)
-        // events for as long as the key is held down.
+        // Windows auto-repeat sends Press (not Repeat) while the key is held.
         for _ in 0..8 {
             app.on_key(press(SPACE));
             assert_eq!(app.state, TimerState::Idle, "auto-repeat must not arm");
@@ -1306,8 +1279,7 @@ mod tests {
     #[test]
     fn puzzle_commands_switch_puzzle_and_session() {
         let (mut app, _g) = test_app("cmd-puzzle");
-        // A session that already has solves is pinned to its puzzle, so /NxN
-        // jumps to another session instead of retyping this one.
+        // A session with solves is pinned to its puzzle, so /NxN jumps elsewhere.
         add_solve(&mut app, 12_000);
         let before = app.scramble.clone();
         assert_eq!(app.current_session().puzzle, Puzzle::Cube3);
@@ -1433,8 +1405,7 @@ mod tests {
     #[test]
     fn session_switches_by_id_and_rejects_bad_input() {
         let (mut app, _g) = test_app("cmd-session");
-        // With a solve recorded, /2x2 forks a second session instead of
-        // retyping this one.
+        // With a solve recorded, /2x2 forks a second session instead of retyping.
         add_solve(&mut app, 9_000);
         run_command(&mut app, "2x2");
         let two = app.current_session().id;

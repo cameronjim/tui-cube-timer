@@ -126,7 +126,7 @@ impl Default for SaveFile {
     }
 }
 
-/// Format an effective time (ms) as "1:02.45" / "12.34". Truncates to centiseconds (WCA style).
+/// Format ms as "1:02.45" / "12.34", truncated to centiseconds (WCA style).
 pub fn format_millis(ms: u64) -> String {
     let centis = ms / 10;
     let (min, rem) = (centis / 6000, centis % 6000);
@@ -138,7 +138,7 @@ pub fn format_millis(ms: u64) -> String {
     }
 }
 
-/// Format a solve's displayed time: "12.34", "14.02+" (plus2, penalty included), "DNF(13.11)".
+/// Format a solve for display: "12.34", "14.02+" (penalty included), "DNF(13.11)".
 pub fn format_solve(s: &Solve) -> String {
     match s.penalty {
         Penalty::None => format_millis(s.millis),

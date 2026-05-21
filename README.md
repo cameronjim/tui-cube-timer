@@ -1,113 +1,193 @@
-# cubetimer
+# Cubetimer
 
-A speedcube timer for your terminal — scrambles for 2x2 through 7x7, WCA-style
-inspection, ao5/ao12/ao100, PB tracking, and persistent sessions. Built in Rust
-with [ratatui](https://ratatui.rs).
+Cubetimer is a speedcube timer that lives in your terminal. It hands you a
+scramble, times the solve, keeps your averages, and remembers everything the
+next time you open it. If you have used csTimer, the rhythm will feel familiar:
+hold the space bar, wait for green, let go, solve, hit any key to stop.
 
-## Run it
+Everything else (sessions, penalties, switching puzzles) happens from a small
+command line at the bottom of the screen, so your hands never have to leave the
+keyboard or reach for a mouse.
+
+## Getting started
+
+Build it once:
 
 ```
-cargo run --release
+cargo build --release
 ```
 
-or grab the built binary at `target\release\cubetimer.exe` and put it on your PATH.
+Then run `target\release\cubetimer.exe`, or drop that file somewhere on your
+PATH and just type `cubetimer`. During development, `cargo run --release` does
+both steps at once.
 
-## Using the timer
+Cubetimer is built for Windows first, because the hold-and-release space bar
+flow needs a terminal that reports key releases and the Windows console does
+that natively. On other platforms it works in terminals that speak the kitty
+keyboard protocol, which Cubetimer asks for at startup.
 
-The flow matches csTimer, minus the inspection step — inspection is **off by
-default**:
+## What you are looking at
 
-1. A scramble is waiting at the top. Scramble your cube.
-2. **Hold space** — the timer turns red, then **green** after 300 ms.
-3. **Release** to start. Digits run in cyan.
-4. Hit **any key** to stop. The solve is saved to disk immediately. You can keep
-   holding the key down afterwards — it stays dead until you let go, and space is
-   ignored for another 300 ms after that, so you never re-trigger by accident.
+The scramble sits across the top in bold, and the border above it tells you
+which puzzle you are on, which session you are in, and whether inspection is
+turned on. The big block digits in the middle are the timer. Underneath them is
+a strip with your averages and personal bests, and the column on the right is
+your times list, newest at the top, with the best of the session in green and
+the worst in red. The line along the bottom is your status line: it shows a
+hint most of the time, the result of your last command after you run one, and
+whatever you are typing while you are in command mode.
 
-### Inspection
+The timer changes colour to tell you what it wants. White means idle, red means
+you are holding but not there yet, green means let go, cyan means you are
+solving, and yellow is the inspection countdown.
 
-WCA-style 15-second inspection is off until you turn it on with `/inspect` (the
-header shows `inspection: on/off`). With it on, an extra step slots in at the
-front: **tap space** to start the yellow countdown, then hold-and-release as
-usual to start the solve. Going over 15s costs you a **+2**, over 17s is a
-**DNF** — applied to the solve automatically. `Esc` cancels a countdown.
+On a narrow or short terminal the times column and the stats strip drop away so
+the timer itself stays readable. Widen the window and they come back.
 
-### Keys
+## Your first solve
 
-| Key | Action |
+Inspection is off by default, so the flow is as short as it gets:
+
+1. Scramble your cube using the sequence at the top.
+2. Hold the space bar. The digits turn red, then green after 300 ms.
+3. Let go on green and the timer starts running in cyan.
+4. Press any key at all to stop it. The solve is written to disk right away.
+
+You do not have to be careful about how you stop. Whatever key you hit stays
+completely dead until you physically let go of it, so you can keep leaning on
+the space bar for as long as you like without arming the next attempt. On top
+of that, space is ignored for another 300 ms after the timer stops. Between the
+two, a bounced key or an over-enthusiastic slap cannot start a solve you did not
+mean to start. Everything else keeps working through that window, so you can
+still press `n`, open the help, or run a command immediately.
+
+Releasing space too early is harmless. If you let go before the digits turn
+green, nothing starts and you are back where you were.
+
+## Inspection
+
+Turn on WCA inspection with `/inspect`, and the top border will start reading
+`inspection: on`. Running it again turns it back off.
+
+With inspection on, one step slots in ahead of everything else. Tap space and a
+15 second countdown starts in yellow. Inspect the cube, then hold space and
+release exactly as before to start the solve. `Esc` backs out of a countdown if
+you change your mind.
+
+The penalties are applied for you, so there is nothing to remember afterwards.
+Going past 15 seconds turns the solve into a +2, and going past 17 seconds makes
+it a DNF. Either way the timer shows what you have earned in red while the
+countdown is still on screen, and the solve is recorded with that penalty
+already attached.
+
+## Keys
+
+| Key | What it does |
 |---|---|
-| `space` | hold-and-release to start / stop (tap to start inspection when it's on) |
+| `space` | hold until green, release to start (a tap starts inspection when inspection is on) |
+| any key | stops a running timer |
 | `n` | new scramble |
-| `/` | command mode |
-| `↑` `↓` / `j` `k` / PgUp PgDn | scroll times |
-| `h` or `?` | help overlay |
-| `Esc` | cancel inspection / close popups |
+| `/` | opens the command line |
+| `↑` `↓` or `k` `j` | scroll the times list one solve at a time |
+| `PgUp` `PgDn` | scroll the times list ten at a time |
+| `Home` | jump the times list back to your newest solve |
+| `h` or `?` | open and close the help overlay |
+| `Esc` | cancel inspection, close the help, leave the command line, clear the status line |
 | `q` | quit |
 
-### Commands
+`Ctrl+C` also quits, from anywhere, if you ever need it.
 
-Type `/` then:
+## Commands
 
-| Command | Action |
+Press `/` to open the command line, type, and press `Enter`. Backspacing past
+the leading slash gets you out again, as does `Esc`. Capitalisation and extra
+spaces do not matter.
+
+| Command | What it does |
 |---|---|
-| `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch puzzle — an empty session is retyped in place; one with solves stays put and you jump to your latest session for that puzzle (created if there isn't one) |
-| `/new [name]` | new session for the current puzzle |
-| `/sessions` | list sessions |
-| `/session <id>` | switch session |
-| `/rename <name>` | rename current session |
-| `/dnf` `/+2` `/ok` | set / clear penalty on the last solve |
-| `/del` | delete the last solve |
-| `/inspect` | toggle 15s inspection (off by default) |
-| `/help` | help overlay |
-| `/quit` | quit |
+| `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch puzzle (see below) |
+| `/new [name]` | start a new session for the current puzzle |
+| `/sessions` | list every session with its id, puzzle and solve count |
+| `/session <id>` | switch to a session by id |
+| `/rename <name>` | rename the session you are in |
+| `/dnf` `/+2` `/ok` | set or clear the penalty on your last solve |
+| `/del` | delete your last solve |
+| `/inspect` | turn 15 second inspection on or off |
+| `/help` | open and close the help overlay |
+| `/quit` or `/q` | quit |
+
+## Sessions and puzzles
+
+A session is just an ordered list of solves for one puzzle, with a name and an
+id. You start with one called `default` on 3x3, and `/new` gives you as many
+more as you want. Without a name, new sessions are numbered for you.
+
+Puzzle switching is built around one rule: a session that has solves in it never
+changes puzzle, because that would mix two events into one set of stats. So if
+your current session is still empty, a command like `/4x4` simply retypes it in
+place and you keep the name you gave it. If it already has solves, Cubetimer
+leaves it alone and takes you to your most recent 4x4 session instead, creating
+one if you have never done a 4x4 solve before. Either way you land on a fresh
+scramble for the new puzzle.
+
+Because switching hops between sessions rather than editing them, going back and
+forth between `/3x3` and `/4x4` all evening will keep dropping you into the same
+two sessions rather than piling up new ones.
 
 ## Where your times live
 
-All sessions are saved as pretty-printed JSON at
-`%APPDATA%\cubetimer\data\sessions.json` (override with the `CUBETIMER_DATA`
-env var — full file path). Saves are atomic (temp file + rename) and happen
-after every solve and every mutating command, so you can close the terminal
-whenever; you'll pick up exactly where you left off.
+Every solve is saved the moment you stop the timer, and so is every command that
+changes something. There is no save step and nothing to remember before you
+close the terminal.
 
-## Stats rules
+Your data lives in a single file:
 
-- Averages are WCA trimmed means: drop the best and worst (ao5/ao12), or the
-  best 5 and worst 5 (ao100), and mean the rest. A DNF counts as worst; more
-  DNFs than the trim allowance makes the whole average a DNF.
-- `+2` adds two seconds to the raw time. Times display truncated to
-  centiseconds, WCA style.
-- PBs (single, ao5, ao12, ao100) are computed across **all** sessions of the
-  current puzzle.
+```
+%APPDATA%\cubetimer\data\sessions.json
+```
+
+It is plain, pretty-printed JSON, so you can read it, back it up, or copy it to
+another machine. Writes go to a temporary file and are then renamed into place,
+which means a crash mid-save cannot leave you with half a file. Set the
+`CUBETIMER_DATA` environment variable to a full file path if you want your times
+somewhere else.
+
+If that file ever does turn up unreadable, Cubetimer refuses to start and tells
+you the path rather than starting fresh over the top of it.
+
+## How the stats work
+
+Your averages follow WCA rules. An ao5 or ao12 throws out the best and the worst
+solve and takes the mean of what is left; an ao100 throws out the best five and
+the worst five. A DNF always counts as the worst solve in the window, so a single
+DNF in an ao5 is absorbed by the trim, and a second one turns the whole average
+into a DNF. When there are not enough solves yet, the average shows as a dash.
+
+A `+2` adds two seconds to the raw time, and everything downstream uses that
+penalised time. Times are truncated to centiseconds rather than rounded, WCA
+style, so 12.349 shows as `12.34`.
+
+The `best`, `worst` and `mean` figures in the stats strip cover the session you
+are in and ignore DNFs. The personal bests are wider: PB single, PB ao5, PB ao12
+and PB ao100 are the best you have ever done across every session of the puzzle
+you are currently on, and the rolling averages behind them are searched within
+each session rather than across the seam between two of them.
 
 ## Scrambles
 
-Random-move scrambles with the standard constraints (no same face twice in a
-row, no three moves on one axis): 2x2 uses U/R/F (9–11 moves), 3x3 is 20 moves,
-4x4 adds Uw/Rw/Fw (44), 5x5 all wide moves (60), 6x6 adds 3-wide (80), 7x7 (100).
+Scrambles are random-move and follow the usual WCA conventions for each cube
+size, with the standard constraints that stop a scramble from undoing itself, so
+the move count you see is the move count you turn. On 5x5, 6x6 and 7x7 they come
+out of the same generation the official scramble program uses. On 2x2 through
+4x4 they are a close practice equivalent rather than a competition-legal
+scramble. Press `n` any time you want a different one. Each solve is stored
+alongside the scramble it was done on.
 
-## Build notes (Windows)
+## Under the hood
 
-Built with the `stable-x86_64-pc-windows-gnu` toolchain (self-contained, no
-Visual Studio required). `parking_lot`/`parking_lot_core` are pinned in
-`Cargo.toml` because newer `parking_lot_core` needs a mingw assembler
-(`as.exe`) that rustup's bundled toolchain doesn't ship — see the comment in
-`Cargo.toml` before unpinning.
+Cubetimer is written in Rust and drawn with [ratatui](https://ratatui.rs). It
+has no runtime dependencies and no configuration file. Build it with
+`cargo build --release` and the binary lands at `target\release\cubetimer.exe`.
 
-## Architecture (if you're here to learn TUIs)
-
-```
-src/main.rs      event loop: poll input → update state → draw   (~60 fps tick)
-src/app.rs       state machine: Idle → Inspecting → Armed → Timing, commands
-src/ui.rs        pure rendering of App state (ratatui widgets, block-digit font)
-src/scramble.rs  random-move generators with face/axis constraints
-src/stats.rs     WCA averages, PBs — pure functions, heavily unit-tested
-src/storage.rs   atomic JSON persistence
-src/types.rs     shared vocabulary: Puzzle, Solve, Session, SaveFile
-```
-
-The key TUI ideas: the terminal is put in **raw mode** (keys arrive as events,
-nothing is echoed), the app **redraws the whole screen every frame** from a
-single `App` state struct (immediate-mode rendering), and the hold-space flow
-works because Windows delivers key **release** events, which most terminals
-don't. `INTERFACES.md` documents the full design contract the modules were
-built against.
+Architecture notes and design documents live in `claude-docs/`, and if you are
+planning to send a change, the ground rules are in `CLAUDE.md`.
