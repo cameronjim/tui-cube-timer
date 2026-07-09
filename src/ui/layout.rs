@@ -20,6 +20,18 @@ pub(super) const HELP_KEY_W: usize = 16;
 /// Columns a help row leaves for its description: [`HELP_W`] less borders, indent and key column.
 const HELP_DESC_W: usize = HELP_W as usize - 2 - 2 - HELP_KEY_W;
 
+/// Width of the solve-detail popup, which shrinks to the terminal exactly as the help overlay does.
+const DETAIL_W: u16 = 52;
+/// Tallest the solve-detail popup grows; past this the scramble truncates inside it.
+const DETAIL_MAX_H: u16 = 20;
+/// Rows the detail popup spends on everything but the scramble: the time, the date, the hint and the blanks between them.
+const DETAIL_FIXED_ROWS: usize = 6;
+
+/// Newer entries kept above the selection in the times list while it moves down.
+const TIMES_LEAD: usize = 2;
+/// Columns between two entries of a stats row; the renderer inserts exactly this many.
+pub(super) const STAT_SEP: usize = 3;
+
 /// Inner area of a bordered block, guarding against rects too small to have one.
 pub(super) fn inner_of(area: Rect) -> Rect {
     Rect {
@@ -108,9 +120,66 @@ pub(super) fn centered(w: u16, h: u16, area: Rect) -> Rect {
     }
 }
 
+/// Where the solve-detail popup sits: as tall as its scramble needs, capped and clamped to `area`.
+pub(super) fn detail_popup(scramble: &str, area: Rect) -> Rect {
+    let width = DETAIL_W.min(area.width);
+    let wanted = scramble_rows(scramble, width.saturating_sub(2))
+        .saturating_add(DETAIL_FIXED_ROWS)
+        .saturating_add(2)
+        .min(DETAIL_MAX_H as usize) as u16;
+    centered(width, wanted, area)
+}
+
+/// The slice of the times list to draw, as `(entries hidden above, entries visible)`.
+///
+/// Both counts index from the newest solve, the way the list is ordered. The window keeps
+/// [`TIMES_LEAD`] newer entries above the selection where it can and never runs past the
+/// oldest solve. Those two rules alone can scroll the selection out of view in a panel one
+/// or two rows tall, which is what the guard at the end is for.
+pub(super) fn times_window(selected: usize, total: usize, rows: usize) -> (usize, usize) {
+    if total == 0 || rows == 0 {
+        return (0, 0);
+    }
+    let selected = selected.min(total - 1);
+    let mut start = selected.saturating_sub(TIMES_LEAD);
+    start = start.min(total.saturating_sub(rows));
+    // That clamp can push the selection off the bottom of a panel one or two rows tall.
+    if selected.saturating_sub(start) >= rows {
+        start = selected.saturating_sub(rows - 1);
+    }
+    (start, rows.min(total - start))
+}
+
+/// How many leading entries of `widths` fit in `width` columns with [`STAT_SEP`] between them.
+///
+/// Entries are dropped from the right, which is the order the stats strip ranks them in. A
+/// non-empty list never packs down to nothing: one clipped entry reads better than a blank row.
+pub(super) fn fit_count(widths: &[usize], width: u16) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    let width = width as usize;
+    let mut used = 0usize;
+    let mut kept = 0usize;
+    for w in widths {
+        let needed = if kept == 0 {
+            *w
+        } else {
+            STAT_SEP.saturating_add(*w)
+        };
+        let end = used.saturating_add(needed);
+        if end > width {
+            break;
+        }
+        used = end;
+        kept = kept.saturating_add(1);
+    }
+    kept.max(1)
+}
+
 /// The `/<puzzle>` description, packed into as many rows as [`HELP_DESC_W`] allows.
 ///
-/// Eleven puzzle names do not fit on one row, and the popup does not wrap, so the list
+/// Twelve puzzle names do not fit on one row, and the popup does not wrap, so the list
 /// is broken here instead of being clipped. Rows after the first are drawn with an empty
 /// key so they line up under the text.
 pub(super) fn puzzle_help_rows(names: &[&str]) -> Vec<String> {
@@ -285,12 +354,123 @@ mod tests {
     fn puzzle_help_rows_wrap_once_the_names_overflow() {
         let names = [
             "2x2", "3x3", "4x4", "5x5", "6x6", "7x7", "pyraminx", "skewb", "megaminx", "sq1",
-            "clock",
+            "clock", "oh",
         ];
         let rows = puzzle_help_rows(&names);
-        assert_eq!(rows.len(), 2, "eleven names take two rows, got {:?}", rows);
+        assert_eq!(rows.len(), 2, "twelve names take two rows, got {:?}", rows);
         assert_eq!(rows[0], "switch puzzle: 2x2 3x3 4x4 5x5 6x6 7x7");
-        assert_eq!(rows[1], "pyraminx skewb megaminx sq1 clock");
+        assert_eq!(rows[1], "pyraminx skewb megaminx sq1 clock oh");
+    }
+
+    // ---- times window
+
+    #[test]
+    fn times_window_shows_the_newest_solves_at_the_top_of_the_list() {
+        assert_eq!(times_window(0, 87, 10), (0, 10));
+        assert_eq!(times_window(1, 87, 10), (0, 10));
+        assert_eq!(times_window(2, 87, 10), (0, 10), "the lead is used up first");
+    }
+
+    #[test]
+    fn times_window_keeps_two_newer_entries_above_a_selection_in_the_middle() {
+        assert_eq!(times_window(3, 87, 10), (1, 10));
+        assert_eq!(times_window(40, 87, 10), (38, 10));
+    }
+
+    #[test]
+    fn times_window_stops_at_the_oldest_solve() {
+        // The last ten of 87 start at 77, and the window does not scroll past them.
+        assert_eq!(times_window(80, 87, 10), (77, 10));
+        assert_eq!(times_window(86, 87, 10), (77, 10));
+    }
+
+    #[test]
+    fn times_window_shows_everything_when_the_list_is_shorter_than_the_panel() {
+        assert_eq!(times_window(0, 4, 10), (0, 4));
+        assert_eq!(times_window(3, 4, 10), (0, 4));
+    }
+
+    #[test]
+    fn times_window_keeps_the_selection_visible_in_a_one_or_two_row_panel() {
+        for rows in [1usize, 2] {
+            for selected in 0..20usize {
+                let (start, len) = times_window(selected, 20, rows);
+                assert!(
+                    (start..start + len).contains(&selected),
+                    "selection {} fell outside {}..{} at {} rows",
+                    selected,
+                    start,
+                    start + len,
+                    rows
+                );
+            }
+        }
+        assert_eq!(times_window(7, 20, 1), (7, 1));
+        assert_eq!(times_window(7, 20, 2), (6, 2));
+    }
+
+    #[test]
+    fn times_window_of_an_empty_or_invisible_list_is_empty() {
+        assert_eq!(times_window(0, 0, 10), (0, 0));
+        assert_eq!(times_window(usize::MAX, 0, 10), (0, 0));
+        assert_eq!(times_window(0, 20, 0), (0, 0));
+    }
+
+    #[test]
+    fn a_selection_past_the_end_is_clamped_to_the_oldest_solve() {
+        assert_eq!(times_window(usize::MAX, 87, 10), (77, 10));
+        assert_eq!(times_window(500, 4, 10), (0, 4));
+    }
+
+    // ---- stats packing
+
+    #[test]
+    fn fit_count_keeps_what_the_row_holds_and_drops_the_rest() {
+        // Three entries of 10 columns need 10 + 3 + 10 + 3 + 10 = 36.
+        let widths = [10usize, 10, 10];
+        assert_eq!(fit_count(&widths, 36), 3);
+        assert_eq!(fit_count(&widths, 35), 2);
+        assert_eq!(fit_count(&widths, 23), 2);
+        assert_eq!(fit_count(&widths, 22), 1);
+    }
+
+    #[test]
+    fn fit_count_never_empties_a_row_it_could_only_clip() {
+        assert_eq!(fit_count(&[10, 10], 0), 1);
+        assert_eq!(fit_count(&[10, 10], 3), 1);
+        assert_eq!(fit_count(&[], 80), 0, "nothing to pack is still nothing");
+    }
+
+    #[test]
+    fn fit_count_survives_absurd_widths() {
+        assert_eq!(fit_count(&[usize::MAX, 1], u16::MAX), 1);
+        assert_eq!(fit_count(&[1, usize::MAX], u16::MAX), 1);
+    }
+
+    // ---- solve detail popup
+
+    #[test]
+    fn the_detail_popup_grows_to_fit_a_megaminx_scramble() {
+        // Seven scramble rows, six fixed rows and two borders.
+        let popup = detail_popup(&mega(), rect(80, 30));
+        assert_eq!((popup.width, popup.height), (DETAIL_W, 15));
+        assert_eq!((popup.x, popup.y), (14, 7), "and it is centered");
+    }
+
+    #[test]
+    fn the_detail_popup_is_shortest_for_a_one_line_scramble() {
+        let popup = detail_popup("R U2 F' L B2 D R' U F2 L'", rect(80, 30));
+        assert_eq!(popup.height, 9);
+    }
+
+    #[test]
+    fn the_detail_popup_is_capped_and_clamped() {
+        let many = [MEGA_LINE; 40].join("\n");
+        assert_eq!(detail_popup(&many, rect(80, 200)).height, DETAIL_MAX_H);
+        for (w, h) in [(80u16, 30u16), (44, 12), (30, 8), (10, 4), (1, 1), (0, 0)] {
+            let popup = detail_popup(&mega(), rect(w, h));
+            assert!(popup.width <= w && popup.height <= h, "{:?} escapes {}x{}", popup, w, h);
+        }
     }
 
     // ---- geometry

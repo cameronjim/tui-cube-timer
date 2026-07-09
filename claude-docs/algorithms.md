@@ -1,10 +1,10 @@
 # Cubetimer algorithms
 
-This document covers the maths Cubetimer implements: WCA trimmed averages, rolling bests
-and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`), and the
-inspection penalty thresholds (`src/app.rs`). Every claim here describes the code as it
-stands, including the places where Cubetimer approximates the official rules rather than
-matching them.
+This document covers the maths Cubetimer implements: WCA trimmed averages, untrimmed means,
+rolling bests and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`),
+and the inspection penalty thresholds and judge calls (`src/app/mod.rs`). Every claim here
+describes the code as it stands, including the places where Cubetimer approximates the
+official rules rather than matching them.
 
 For how these pieces fit into the program, see [architecture.md](architecture.md).
 Project-level guidance is in [../CLAUDE.md](../CLAUDE.md); code style rules are in
@@ -52,10 +52,11 @@ fn trim_count(n: usize) -> usize {
 
 Trim is `ceil(n / 20)`, which is 5 percent of the window rounded up, taken from *each*
 end. That gives 1 for everything up to ao20, 2 for ao21 through ao40, 3 for ao41 through
-ao60, and 5 for ao100. The three averages Cubetimer actually displays are ao5 and ao12
-(trim 1 each end, matching WCA Regulation 9f exactly) and ao100 (trim 5 each end, the
-standard practice-timer convention). The formula is general, so `average_of` works for any
-window size.
+ao60, 5 for ao100 and 50 for ao1000. The four trimmed averages Cubetimer displays are ao5
+and ao12 (trim 1 each end, matching WCA Regulation 9f exactly), ao100 (trim 5 each end, the
+standard practice-timer convention) and ao1000 (trim 50 each end, the same convention
+carried up). The formula is general, so `average_of` works for any window size and none of
+the four is special-cased.
 
 ### Ordering with DNFs
 
@@ -88,7 +89,8 @@ without any special-casing.
 2. **Count DNFs.** If there are strictly more DNFs than the trim count, the trim cannot
    absorb them all, at least one DNF would have to enter the mean, and there is no
    sensible number to report. The result is `AvgResult::Dnf`. For an ao5 or ao12 that
-   means one DNF is survivable and two are not; for an ao100 it takes six.
+   means one DNF is survivable and two are not; for an ao100 it takes six, and for an
+   ao1000 it takes fifty-one.
 
 3. **Sort and trim.** Sort the effective times with `cmp_effective` and keep the middle
    slice `times[trim .. n - trim]`. Because step 2 guarantees at most `trim` DNFs and
@@ -149,6 +151,52 @@ Add a second DNF anywhere in that window and the result becomes `AvgResult::Dnf`
 
 ---
 
+## The untrimmed mean: mo3
+
+An moN is not a small aoN. It is the plain arithmetic mean of the window with nothing
+trimmed, which is how the WCA scores 6x6, 7x7 and the blindfolded events, and Cubetimer
+shows the mo3 of your last three solves beside the trimmed averages. The implementation is
+a separate function precisely so the difference is impossible to blur:
+
+```rust
+fn mean_window(window: &[Solve]) -> AvgResult {
+    if window.is_empty() {
+        return AvgResult::NotEnough;
+    }
+    let mut sum: u128 = 0;
+    for solve in window {
+        match solve.effective_millis() {
+            Some(ms) => sum += ms as u128,
+            None => return AvgResult::Dnf,
+        }
+    }
+    AvgResult::Time((sum / window.len() as u128) as u64)
+}
+```
+
+The whole distinction is in that `None` arm. There is no trim, so there is no discarded
+slot for a DNF to fall into and no `cmp_effective` ordering to exploit: **one DNF anywhere
+in the window makes the entire mean a DNF**, and the function returns the moment it sees
+one. Compare the ao5, where the single DNF of the worked example above is trimmed away and
+the average survives. Same three solves with a DNF among them: the ao5 reports a time, the
+mo3 reports `DNF`. Both are correct, because they are answering different questions.
+
+Two things are shared with the trimmed path rather than reimplemented. Penalties still
+arrive through `effective_millis`, so a `+2` in an mo3 costs its two seconds. The
+accumulator is still `u128` for the same overflow reason, and the mean is still an integer
+division, so it truncates downward like everything else.
+
+`mean_of_last(n, solves)` is the tail wrapper, mirroring `average_of`: fewer than `n`
+solves is `NotEnough`, never a partial mean. `best_mean_of(n, solves)` is the rolling
+counterpart of `best_average_of` and skips DNF windows rather than scoring them as
+infinitely slow, exactly as the trimmed version does.
+
+The three-wide window is what makes any of this cheap. `n` of 3 means `mean_window` is a
+three-element loop with no sort at all, so mo3 is the one statistic on the strip whose cost
+never depends on the size of the average.
+
+---
+
 ## Rolling bests and personal bests
 
 `best_average_of(n, solves)` slides an `n`-wide window across the whole session and keeps
@@ -184,19 +232,30 @@ sort.
 `session_stats` bundles what the stats strip needs, all in one pass over the effective
 times: `count` (including DNFs), `valid_count` (excluding them), `best` and `worst` as the
 min and max of the non-DNF effective times, a plain truncated `mean` of the non-DNF times,
-and `ao5` / `ao12` / `ao100` from `average_of`. A DNF can never be the `worst` single,
-because it is filtered out before the max is taken.
+`mo3` from `mean_of_last`, and `ao5` / `ao12` / `ao100` / `ao1000` from `average_of`. A DNF
+can never be the `worst` single, because it is filtered out before the max is taken. Note
+that `mean` and `mo3` are different things despite both being untrimmed: `mean` covers the
+whole session and simply skips DNFs, while `mo3` covers the last three solves and is
+poisoned by one.
 
 `personal_bests` computes all-time bests across a set of sessions:
 
 ```rust
 for session in sessions {
     keep_min(&mut pb.single, session.solves.iter().filter_map(|s| s.effective_millis()).min());
-    keep_min(&mut pb.ao5,   best_average_of(5, &session.solves));
-    keep_min(&mut pb.ao12,  best_average_of(12, &session.solves));
-    keep_min(&mut pb.ao100, best_average_of(100, &session.solves));
+    keep_min(&mut pb.mo3,    best_mean_of(3, &session.solves));
+    keep_min(&mut pb.ao5,    best_average_of(5, &session.solves));
+    keep_min(&mut pb.ao12,   best_average_of(12, &session.solves));
+    keep_min(&mut pb.ao100,  best_average_of(100, &session.solves));
+    keep_min(&mut pb.ao1000, best_average_of(1000, &session.solves));
 }
 ```
+
+`pb.mo3` is the one entry that goes through `best_mean_of` rather than `best_average_of`,
+so a personal best mo3 is a stretch of three clean solves and can never contain a DNF. The
+ao1000 entry is the expensive one, which is why `best_average_of` returns early when the
+session is shorter than the window: most sessions never reach a thousand solves and pay
+nothing for the row being on screen.
 
 Two properties are worth stating explicitly. **Rolling windows never span a session
 boundary**, because `best_average_of` is called once per session; five solves spread across
@@ -214,9 +273,23 @@ ever mixes events.
 `scramble::generate(puzzle)` returns a scramble in WCA notation. `generate_with_rng(puzzle,
 rng)` is the same function with an injectable generator, which is how the tests get
 reproducible scrambles from `StdRng::seed_from_u64`. `mod.rs` does nothing but match on
-`Puzzle` and hand off; each family lives in its own file, because the eleven events share
+`Puzzle` and hand off; each family lives in its own file, because the events share almost
 no notation and almost no structure. Every generator is a `fn scramble<R: Rng>(rng: &mut R)
 -> String` and every one is total, meaning no retry loops and no path that can fail.
+
+Twelve events, eleven generators. `Puzzle::Oh` is 3x3 with one hand behind your back, so
+the dispatch maps it onto the 3x3 generator verbatim:
+
+```rust
+Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
+```
+
+That is the whole of one-handed as far as scrambling is concerned, and mapping it here
+rather than inside `cube.rs` is also what keeps `cube::scramble` a function of cube
+variants only. The event is separate everywhere it matters, meaning its own session and its
+own personal bests, and identical everywhere it does not. A seeded test asserts the two
+generators agree scramble for scramble on the same seed, so the identity cannot quietly
+drift.
 
 Two things are true across all of them. The output is a single string, space separated,
 with no leading or trailing whitespace; Megaminx is the only one that contains a newline.
@@ -238,6 +311,7 @@ saying otherwise would be dishonest.
 | Megaminx | random-move | random-move | **Emission-identical.** Same distribution, only the PRNG differs |
 | 5x5, 6x6, 7x7 | random-move | random-move | **Equivalent.** Same pools, lengths and legality rule |
 | 2x2, 3x3, 4x4 | random-state | random-move | Approximation |
+| One-handed | random-state (as 3x3) | random-move (as 3x3) | Approximation, identical to 3x3 |
 | Pyraminx, Skewb | random-state | random-move | Approximation |
 | Square-1 | random-state | random-move, shape-aware | Approximation, close |
 
@@ -611,6 +685,52 @@ disk always comes from `refresh_inspection`, never from the display.
 A +2 earned during inspection is stored as `Penalty::Plus2` on the solve, so it flows
 through `effective_millis` like any other +2: two seconds added when the solve is read, and
 `format_solve` renders it as `14.02+` with the penalty already included in the number.
+
+### The 8 and 12 second judge calls
+
+A WCA judge calls "8 seconds" and "12 seconds" while a competitor inspects, and those two
+calls are half of how anyone paces the last third of an inspection. `refresh_inspection`
+reproduces them from the same `elapsed` it uses for the penalties:
+
+```rust
+const INSPECTION_CALL_8_MS: u128 = 8_000;
+const INSPECTION_CALL_12_MS: u128 = 12_000;
+
+let stage = if elapsed >= INSPECTION_CALL_12_MS {
+    2
+} else if elapsed >= INSPECTION_CALL_8_MS {
+    1
+} else {
+    0
+};
+if stage > self.inspection_stage {
+    self.inspection_stage = stage;
+    self.bell_pending = true;
+}
+```
+
+Three properties are worth naming.
+
+**The comparisons are inclusive**, unlike the strictly-greater penalty thresholds above. A
+call announces that a mark has been reached, so it belongs at 8,000 ms exactly; a penalty
+punishes overrunning one, so it belongs strictly after. The asymmetry is deliberate.
+
+**The stage is the record of what has already sounded.** `stage > self.inspection_stage` is
+the entire guard, so each threshold rings exactly once per inspection however many of the
+15 ms ticks land past it, and the stage only ever climbs. It is reset to 0 by
+`start_inspection`, `cancel_inspection`, `start_timing` and `finish_solve`, which is what
+makes "once per inspection" true rather than "once per run".
+
+**One field drives both outputs.** `ui::timer_view` matches on `inspection_stage` for the
+countdown colour, yellow at 0, light magenta at 1, light red at 2, and `main.rs` drains
+`bell_pending` through `App::take_bell` to write a BEL. Deriving the colour from the same
+value that queued the bell is what stops the two from disagreeing about when a call
+happened. The audible half is `main.rs`'s job because `App` does no I/O; see
+[architecture.md](architecture.md).
+
+The penalty display still wins over the stage colour. Once `inspection_remaining` reaches 0
+or below, `timer_view` paints the countdown plain red and adds the `+2` or `DNF` caption,
+so an earned penalty is never mistaken for a judge call that only warns.
 
 ---
 

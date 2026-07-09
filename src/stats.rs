@@ -74,12 +74,55 @@ pub fn average_of(n: usize, solves: &[Solve]) -> AvgResult {
 
 /// Best rolling aoN in the session; `None` if never enough solves or every window DNF'd.
 pub fn best_average_of(n: usize, solves: &[Solve]) -> Option<u64> {
+    // The length guard is also the cheap early-out: `average_window` sorts every window, so
+    // the loop below costs O((L - n + 1) * n log n) and dominates a cache refresh at n = 1000.
     if n == 0 || solves.len() < n {
         return None;
     }
     let mut best: Option<u64> = None;
     for window in solves.windows(n) {
         if let AvgResult::Time(t) = average_window(window) {
+            best = Some(match best {
+                Some(b) if b <= t => b,
+                _ => t,
+            });
+        }
+    }
+    best
+}
+
+/// Plain untrimmed mean over exactly this window: one DNF poisons the whole result.
+fn mean_window(window: &[Solve]) -> AvgResult {
+    if window.is_empty() {
+        return AvgResult::NotEnough;
+    }
+    let mut sum: u128 = 0;
+    for solve in window {
+        match solve.effective_millis() {
+            Some(ms) => sum += ms as u128,
+            None => return AvgResult::Dnf,
+        }
+    }
+    AvgResult::Time((sum / window.len() as u128) as u64)
+}
+
+/// Untrimmed mean of the last `n` solves, the "moN" of cubing: nothing is trimmed, so any
+/// DNF in the window makes the whole mean a DNF rather than being absorbed as the worst.
+pub fn mean_of_last(n: usize, solves: &[Solve]) -> AvgResult {
+    if n == 0 || solves.len() < n {
+        return AvgResult::NotEnough;
+    }
+    mean_window(&solves[solves.len() - n..])
+}
+
+/// Best rolling moN in the session; windows holding a DNF are skipped, not counted as slow.
+pub fn best_mean_of(n: usize, solves: &[Solve]) -> Option<u64> {
+    if n == 0 || solves.len() < n {
+        return None;
+    }
+    let mut best: Option<u64> = None;
+    for window in solves.windows(n) {
+        if let AvgResult::Time(t) = mean_window(window) {
             best = Some(match best {
                 Some(b) if b <= t => b,
                 _ => t,
@@ -102,9 +145,12 @@ pub struct SessionStats {
     pub worst: Option<u64>,
     /// Plain mean of non-DNF effective times, truncated.
     pub mean: Option<u64>,
+    /// Untrimmed mean of the last three solves.
+    pub mo3: AvgResult,
     pub ao5: AvgResult,
     pub ao12: AvgResult,
     pub ao100: AvgResult,
+    pub ao1000: AvgResult,
 }
 
 pub fn session_stats(solves: &[Solve]) -> SessionStats {
@@ -125,9 +171,11 @@ pub fn session_stats(solves: &[Solve]) -> SessionStats {
         best,
         worst,
         mean,
+        mo3: mean_of_last(3, solves),
         ao5: average_of(5, solves),
         ao12: average_of(12, solves),
         ao100: average_of(100, solves),
+        ao1000: average_of(1000, solves),
     }
 }
 
@@ -135,9 +183,12 @@ pub fn session_stats(solves: &[Solve]) -> SessionStats {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersonalBests {
     pub single: Option<u64>,
+    /// Best untrimmed mean of three anywhere in a session.
+    pub mo3: Option<u64>,
     pub ao5: Option<u64>,
     pub ao12: Option<u64>,
     pub ao100: Option<u64>,
+    pub ao1000: Option<u64>,
 }
 
 /// Keep the smaller of `slot` and `candidate`.
@@ -159,9 +210,11 @@ pub fn personal_bests(sessions: &[&Session]) -> PersonalBests {
             .filter_map(|s| s.effective_millis())
             .min();
         keep_min(&mut pb.single, single);
+        keep_min(&mut pb.mo3, best_mean_of(3, &session.solves));
         keep_min(&mut pb.ao5, best_average_of(5, &session.solves));
         keep_min(&mut pb.ao12, best_average_of(12, &session.solves));
         keep_min(&mut pb.ao100, best_average_of(100, &session.solves));
+        keep_min(&mut pb.ao1000, best_average_of(1000, &session.solves));
     }
     pb
 }
@@ -224,6 +277,8 @@ mod tests {
         assert_eq!(trim_count(41), 3);
         assert_eq!(trim_count(100), 5);
         assert_eq!(trim_count(101), 6);
+        // ao1000 trims 50 from each end, leaving 900 solves in the mean.
+        assert_eq!(trim_count(1000), 50);
     }
 
     #[test]
@@ -468,9 +523,11 @@ mod tests {
         assert_eq!(st.best, None);
         assert_eq!(st.worst, None);
         assert_eq!(st.mean, None);
+        assert_eq!(st.mo3, AvgResult::NotEnough);
         assert_eq!(st.ao5, AvgResult::NotEnough);
         assert_eq!(st.ao12, AvgResult::NotEnough);
         assert_eq!(st.ao100, AvgResult::NotEnough);
+        assert_eq!(st.ao1000, AvgResult::NotEnough);
     }
 
     #[test]
@@ -483,9 +540,12 @@ mod tests {
         assert_eq!(d.best, empty.best);
         assert_eq!(d.worst, empty.worst);
         assert_eq!(d.mean, empty.mean);
+        assert_eq!(d.mo3, empty.mo3);
         assert_eq!(d.ao5, empty.ao5);
         assert_eq!(d.ao12, empty.ao12);
         assert_eq!(d.ao100, empty.ao100);
+        assert_eq!(d.ao1000, empty.ao1000);
+        assert_eq!(d, empty);
     }
 
     #[test]
@@ -521,8 +581,11 @@ mod tests {
             st.ao5,
             AvgResult::Time((12_500 + 13_000 + 14_000) / 3)
         );
+        // mo3 over the last three, untrimmed: 12.500, 13.000, 11.000.
+        assert_eq!(st.mo3, AvgResult::Time((12_500 + 13_000 + 11_000) / 3));
         assert_eq!(st.ao12, AvgResult::NotEnough);
         assert_eq!(st.ao100, AvgResult::NotEnough);
+        assert_eq!(st.ao1000, AvgResult::NotEnough);
     }
 
     #[test]
@@ -547,14 +610,18 @@ mod tests {
     #[test]
     fn personal_bests_empty_inputs() {
         let pb = personal_bests(&[]);
+        assert_eq!(pb, PersonalBests::default());
         assert_eq!(pb.single, None);
+        assert_eq!(pb.mo3, None);
         assert_eq!(pb.ao5, None);
         assert_eq!(pb.ao12, None);
         assert_eq!(pb.ao100, None);
+        assert_eq!(pb.ao1000, None);
 
         let empty = session(1, &[]);
         let pb = personal_bests(&[&empty]);
         assert_eq!(pb.single, None);
+        assert_eq!(pb.mo3, None);
         assert_eq!(pb.ao5, None);
     }
 
@@ -602,5 +669,155 @@ mod tests {
         a.solves.push(dnf(1_000)); // fastest raw time, but a DNF
         let pb = personal_bests(&[&a]);
         assert_eq!(pb.single, Some(20_000));
+    }
+
+    // ---- mo3, the untrimmed mean of the last n ---------------------------
+
+    #[test]
+    fn mo3_clean() {
+        let v = solves(&[10_000, 11_000, 12_000]);
+        assert_eq!(mean_of_last(3, &v), AvgResult::Time(11_000));
+    }
+
+    #[test]
+    fn mo3_counts_the_plus2() {
+        // Effective 10.000, 13.000, 12.000.
+        let v = vec![s(10_000), plus2(11_000), s(12_000)];
+        assert_eq!(
+            mean_of_last(3, &v),
+            AvgResult::Time((10_000 + 13_000 + 12_000) / 3)
+        );
+    }
+
+    #[test]
+    fn mo3_any_dnf_is_dnf() {
+        // Nothing is trimmed, so a DNF cannot be absorbed the way an ao5 absorbs it.
+        let mut v = solves(&[10_000, 11_000, 12_000]);
+        v[0] = dnf(1_000);
+        assert_eq!(mean_of_last(3, &v), AvgResult::Dnf);
+
+        let mut v = solves(&[10_000, 11_000, 12_000]);
+        v[1] = dnf(1_000);
+        assert_eq!(mean_of_last(3, &v), AvgResult::Dnf);
+
+        let mut v = solves(&[10_000, 11_000, 12_000]);
+        v[2] = dnf(99_000);
+        assert_eq!(mean_of_last(3, &v), AvgResult::Dnf);
+        // The same three solves make a perfectly good ao3, which trims the DNF away.
+        assert_eq!(average_of(3, &v), AvgResult::Time(11_000));
+    }
+
+    #[test]
+    fn mo3_two_solves_is_not_enough() {
+        assert_eq!(
+            mean_of_last(3, &solves(&[10_000, 11_000])),
+            AvgResult::NotEnough
+        );
+        assert_eq!(mean_of_last(3, &[]), AvgResult::NotEnough);
+        assert_eq!(mean_of_last(0, &solves(&[1, 2, 3])), AvgResult::NotEnough);
+    }
+
+    #[test]
+    fn mo3_does_not_trim() {
+        // ao3 trims the 10 and the 40 and reports the survivor; mo3 keeps all three.
+        let v = solves(&[10_000, 13_000, 40_000]);
+        assert_eq!(average_of(3, &v), AvgResult::Time(13_000));
+        assert_eq!(mean_of_last(3, &v), AvgResult::Time(21_000));
+    }
+
+    #[test]
+    fn mean_of_last_uses_the_tail_and_truncates() {
+        let mut v = solves(&[1_000, 1_000, 1_000]);
+        v.extend(solves(&[10_000, 11_000, 11_002]));
+        // 32.002 / 3 = 10667.33, truncated to 10667.
+        assert_eq!(mean_of_last(3, &v), AvgResult::Time(10_667));
+    }
+
+    // ---- rolling best mean -----------------------------------------------
+
+    #[test]
+    fn best_mean_of_picks_a_non_final_window() {
+        let v = solves(&[10_000, 10_000, 10_000, 30_000, 30_000, 30_000]);
+        assert_eq!(best_mean_of(3, &v), Some(10_000));
+        assert_eq!(mean_of_last(3, &v), AvgResult::Time(30_000));
+    }
+
+    #[test]
+    fn best_mean_of_skips_dnf_windows() {
+        // Only the final window is DNF-free, even though earlier windows hold fast raw times.
+        let v = vec![
+            dnf(1_000),
+            dnf(1_000),
+            dnf(1_000),
+            dnf(1_000),
+            s(10_000),
+            s(11_000),
+            s(12_000),
+        ];
+        assert_eq!(best_mean_of(3, &v), Some(11_000));
+    }
+
+    #[test]
+    fn best_mean_of_none_when_no_clean_window() {
+        assert_eq!(best_mean_of(3, &[dnf(1), dnf(2), dnf(3), s(4)]), None);
+        assert_eq!(best_mean_of(3, &[]), None);
+        assert_eq!(best_mean_of(3, &solves(&[1, 2])), None);
+        assert_eq!(best_mean_of(0, &solves(&[1, 2, 3])), None);
+    }
+
+    // ---- ao1000 ----------------------------------------------------------
+
+    #[test]
+    fn ao1000_needs_a_thousand_solves() {
+        let times: Vec<u64> = (1..=999).map(|i| i * 1_000).collect();
+        let st = session_stats(&solves(&times));
+        assert_eq!(st.count, 999);
+        assert_eq!(st.ao1000, AvgResult::NotEnough);
+    }
+
+    #[test]
+    fn ao1000_at_exactly_a_thousand_trims_fifty_each_end() {
+        let times: Vec<u64> = (1..=1_000).map(|i| i * 1_000).collect();
+        let v = solves(&times);
+        // trim_count(1000) is 50, so the mean runs over 51.000 through 950.000.
+        let expected: u64 = (51..=950).map(|i| i * 1_000).sum::<u64>() / 900;
+        assert_eq!(average_of(1000, &v), AvgResult::Time(expected));
+        assert_eq!(session_stats(&v).ao1000, AvgResult::Time(expected));
+    }
+
+    // ---- personal bests for the new fields -------------------------------
+
+    #[test]
+    fn personal_bests_mo3_across_sessions() {
+        // Session 2 holds the best mean of three.
+        let a = session(1, &[20_000, 20_000, 20_000]);
+        let b = session(2, &[9_000, 10_000, 11_000, 30_000]);
+        let pb = personal_bests(&[&a, &b]);
+        assert_eq!(pb.single, Some(9_000));
+        assert_eq!(pb.mo3, Some(10_000));
+        assert_eq!(pb.ao1000, None);
+    }
+
+    #[test]
+    fn personal_bests_mo3_windows_do_not_span_sessions() {
+        // Two solves each; only a combined slice would reach three.
+        let a = session(1, &[10_000, 10_000]);
+        let b = session(2, &[10_000, 10_000]);
+        let pb = personal_bests(&[&a, &b]);
+        assert_eq!(pb.single, Some(10_000));
+        assert_eq!(pb.mo3, None);
+    }
+
+    #[test]
+    fn personal_bests_ao1000_across_sessions() {
+        let slow: Vec<u64> = (1..=1_000).map(|i| i * 1_000).collect();
+        let fast: Vec<u64> = (1..=1_000).map(|i| i * 100).collect();
+        let a = session(1, &slow);
+        let b = session(2, &fast);
+        let pb = personal_bests(&[&a, &b]);
+        assert_eq!(pb.single, Some(100));
+        assert_eq!(pb.mo3, Some((100 + 200 + 300) / 3));
+        let expected: u64 = (51..=950).map(|i| i * 100).sum::<u64>() / 900;
+        assert_eq!(pb.ao1000, Some(expected));
     }
 }

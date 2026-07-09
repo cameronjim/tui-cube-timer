@@ -40,27 +40,37 @@ test crate. Colocation buys access to private items, which matters here: `trim_c
 `average_window`, `is_legal`, `tmp_path` and the private fields of `App` are all tested
 directly.
 
-Current state, 227 tests, all green:
+A test lives with its subject, which means a split moves tests as well as code. Where two
+files inside one directory need the same scaffolding, it goes in a `#[cfg(test)] mod
+testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `release`,
+`run_command` and friends for all three files of `app/`, and a private `mod testkit` at the
+bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for both renderers. Never
+duplicate a helper across sibling files.
+
+Current state, 299 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `app.rs` | 71 | State machine, keys, `/commands`, sanitize, persistence side effects |
-| `stats.rs` | 32 | Trimmed averages, penalties, session stats, personal bests |
-| `storage.rs` | 24 | Round trips, atomic write, missing versus corrupt files, the size cap, both migrations |
-| `ui/layout.rs` | 16 | Panel heights, word wrap, the header cap, popup packing |
+| `app/mod.rs` | 53 | State machine, keys, inspection and judge calls, the times cursor, the detail overlay, the derived cache |
+| `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
+| `app/commands.rs` | 32 | Every `/command`, its arguments, its refusals and its persistence |
+| `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
+| `ui/layout.rs` | 29 | Panel heights, word wrap, the header cap, popup packing |
+| `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
-| `ui/mod.rs` | 9 | Render smoke at four sizes, one content anchor |
+| `ui/mod.rs` | 12 | Render smoke at four sizes, one content anchor |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
 | `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
-| `types.rs` | 7 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
-| `scramble/mod.rs` | 3 | Every puzzle dispatches, is non-empty and is seed-stable |
+| `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
+| `ui/overlay.rs` | 5 | Both popups at four sizes, clamping, which one wins |
+| `scramble/mod.rs` | 5 | Every puzzle dispatches, is non-empty and is seed-stable |
 
-The three tests in `scramble/mod.rs` are worth their line count out of proportion to their
-size: each loops over `Puzzle::ALL`, so adding a twelfth event without writing a generator
-for it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
+The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
+each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a generator for
+it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
 thing, rendering every puzzle at every size.
 
 ## Testing pure logic
@@ -169,8 +179,8 @@ and it is available to any generator that simulates rather than just samples.
 
 ## Testing the state machine
 
-`app.rs` tests drive the real `App` through synthetic input. Three techniques do all the
-work.
+The tests across `app/` drive the real `App` through synthetic input. Three techniques do
+all the work, and all three live in `app/testkit.rs`.
 
 **Synthetic key events.** `press`, `release` and `repeat` build a `KeyEvent` with the right
 `KeyEventKind`, so a test spells out the exact physical sequence the app will see, including
@@ -256,7 +266,7 @@ nothing cannot pass the whole file. Beyond that anchor, content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
 moving is higher than the bug rate it would catch, and the pieces where a wrong value would
-actually matter are computed and tested in `app.rs`, `stats.rs` and `ui/layout.rs` before
+actually matter are computed and tested in `app/`, `stats.rs` and `ui/layout.rs` before
 the renderer ever sees them.
 
 ## What is deliberately not covered
@@ -288,8 +298,9 @@ say why in the commit.
 
 Say you add a `/scramble <text>` command that overrides the current scramble.
 
-1. **Pick the module.** It is command handling, so it belongs in `app.rs`, in the
-   `// ----- commands` section of the test module, next to the other command tests.
+1. **Pick the module.** It is command handling, so the handler goes in `app/commands.rs`
+   and the test goes in that file's test module, next to the other command tests. The
+   helpers it needs are already in `app/testkit.rs`.
 
 2. **Build an app.** `let (mut app, _g) = test_app("scramble-cmd");` Give the tag a name
    that reads clearly in a temp directory listing if a run ever dies mid-test. Keep `_g`
@@ -304,7 +315,7 @@ Say you add a `/scramble <text>` command that overrides the current scramble.
 
    ```rust
    assert_eq!(app.scramble, "R U R' U'");
-   assert_eq!(app.times_scroll, 0);
+   assert_eq!(app.times_selected, 0);
    assert_eq!(app.state, TimerState::Idle);
    ```
 
