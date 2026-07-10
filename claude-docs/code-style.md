@@ -16,11 +16,13 @@ main.rs  ->  ui/    ->  app/ (read-only), types.rs
 
 `app/`, `scramble/` and `ui/` are directories, not files, because one responsibility
 outgrew one file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per puzzle
-family; `ui/mod.rs` draws, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds
-the pure geometry both draw into; `app/mod.rs` runs the state machine, `app/commands.rs`
-runs command mode and `app/repair.rs` repairs a save file. A directory is still one module
-for the purposes of this document: the boundary rules below apply to `ui/` as a whole, not
-to each file inside it, and the same goes for `app/`.
+family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
+block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
+geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
+command mode, `app/selection.rs` owns the times cursor and the two list overlays, and
+`app/repair.rs` repairs a save file. A directory is still one module for the purposes of
+this document: the boundary rules below apply to `ui/` as a whole, not to each file inside
+it, and the same goes for `app/`.
 
 `types.rs` sits at the bottom and depends on nothing but `serde`. Its module doc says so
 out loud: keep it dependency-light. Anything that grows a dependency there ripples through
@@ -104,27 +106,32 @@ a line-count split. Never split by "first half, second half".
 
 The three directories show what a good split looks like. `scramble/` divides by puzzle
 family, because the generators share nothing but the `Rng` they are handed. `ui/` divides
-by kind of work: `mod.rs` draws, `overlay.rs` draws the popups over it, and `layout.rs`
-computes geometry and touches neither `Frame` nor `App`, which turned the degradation rules
-from something checked by eye into ordinary unit tests. `app/` divides by question asked:
-`repair.rs` answers "is this save file internally consistent" as free functions over
-`&mut SaveFile`, `commands.rs` owns command mode behind the single `on_command_key` entry
-point, and `mod.rs` keeps the state machine. Every one of those splits made the code more
-testable, which is the sign you cut in the right place.
+by kind of work: `mod.rs` draws the frame, `timer.rs` draws the one panel with a rendering
+model of its own, `overlay.rs` draws the popups over both, and `layout.rs` computes geometry
+and touches neither `Frame` nor `App`, which turned the degradation rules from something
+checked by eye into ordinary unit tests. `app/` divides by question asked: `repair.rs`
+answers "is this save file internally consistent" as free functions over `&mut SaveFile`,
+`commands.rs` owns command mode behind the single `on_command_key` entry point,
+`selection.rs` owns which solve or session you are pointing at, which the timer never asks,
+and `mod.rs` keeps the state machine. Every one of those splits made the code more testable,
+which is the sign you cut in the right place.
 
 Two habits make a split of this kind cheap. First, the public surface does not move: `App`,
 `TimerState` and `InputMode` are still `crate::app::*`, so `main.rs` and `ui` never learned
 that `app` became a directory. Second, tests move with their subject, and the scaffolding
 they share moves to a `#[cfg(test)] mod testkit` beside them rather than being duplicated.
 
-`app/mod.rs` (about 510 non-test lines) and `ui/mod.rs` (about 517) are both a little over
-the line, and each has one seam marked for whenever it next grows:
+A third habit is worth naming from the two splits that produced `app/selection.rs` and
+`ui/timer.rs`: the parent keeps one entry point per cluster and the child keeps everything
+behind it. `on_key_idle` hands its cursor keys to `selection::on_key_times` rather than
+importing `TIMES_PAGE` back out, and `draw_body` calls `timer::draw_timer` rather than
+knowing what `GLYPH_H` is. A constant that has to travel back up to the parent is a sign the
+cut was made one function too deep.
 
-- **The times cursor and the solve-detail overlay**, in `app/mod.rs`: `select_newer`,
-  `select_older`, `open_solve_detail`, `on_key_solve_detail` and `recall_scramble` are
-  selection state, not timer state.
-- **The big timer**, in `ui/mod.rs`: `timer_view`, `draw_timer` and the `GLYPH_H` block
-  font are the one panel with a rendering model of its own.
+No file in `src/` is over the line now. The largest are `app/mod.rs` at 475 non-test lines
+and `ui/mod.rs` at 367; the next candidates below them are `storage.rs` at 345 and
+`app/commands.rs` at 303, and none of the four has a seam worth cutting yet. Treat growth
+past roughly 500 in any of them as the prompt to look again.
 
 ## Comments
 

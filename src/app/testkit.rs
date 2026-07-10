@@ -1,4 +1,4 @@
-//! Test scaffolding shared by the three files of `app`.
+//! Test scaffolding shared by the four files of `app`.
 //!
 //! The helpers are short on purpose: they appear dozens of times per file.
 
@@ -126,4 +126,12 @@ pub(super) fn start_timing_now(app: &mut App) {
     }
     app.on_key(release(SPACE));
     assert!(matches!(app.state, TimerState::Timing { .. }));
+}
+
+/// Record a solve through the real path, then clear the guards a user clears by waiting.
+pub(super) fn perform_solve(app: &mut App) {
+    start_timing_now(app);
+    app.on_key(press(KeyCode::Char('x')));
+    app.on_key(release(KeyCode::Char('x')));
+    app.stopped_at = None;
 }

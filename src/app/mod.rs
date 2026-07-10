@@ -1,10 +1,12 @@
 //! Timer state machine and key handling; `ui` renders only from [`App`] fields refreshed here.
 //!
-//! The two clusters that answer their own question live beside this file: [`commands`] runs
-//! the `/command` line, and [`repair`] makes a parsed save file internally consistent.
+//! The three clusters that answer their own question live beside this file: [`commands`] runs
+//! the `/command` line, [`selection`] owns the times cursor and the two list overlays, and
+//! [`repair`] makes a parsed save file internally consistent.
 
 mod commands;
 mod repair;
+mod selection;
 #[cfg(test)]
 mod testkit;
 
@@ -32,8 +34,6 @@ const INSPECTION_DNF_MS: u128 = 17_000;
 const INSPECTION_CALL_8_MS: u128 = 8_000;
 /// Second WCA judge call: the "12 seconds" warning.
 const INSPECTION_CALL_12_MS: u128 = 12_000;
-/// How far PageUp and PageDown move the times cursor.
-const TIMES_PAGE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerState {
@@ -58,8 +58,10 @@ pub struct App {
     pub scramble: String,
     pub status_msg: Option<String>,
     pub show_help: bool,
-    /// Open sessions overlay. Mutually exclusive with [`App::show_help`]; the solve detail wins over both.
-    pub show_sessions: bool,
+    /// Open sessions overlay, holding the cursor's index into `save.sessions`.
+    ///
+    /// Mutually exclusive with [`App::show_help`]; the solve detail wins over both.
+    pub sessions_overlay: Option<usize>,
     /// Times-list cursor, counted from the newest solve: 0 is the newest.
     pub times_selected: usize,
     /// Open solve-detail overlay, holding the same index-from-newest as [`App::times_selected`].
@@ -81,8 +83,6 @@ pub struct App {
     // --- internal bookkeeping (not part of the ui contract) ---
     /// Inspection start, kept while armed so an aborted arm restores the countdown.
     inspection_start: Option<Instant>,
-    /// A judge call is waiting to be sounded; `main.rs` drains it with [`App::take_bell`].
-    bell_pending: bool,
     /// Key that stopped the timer: inert until its Release (Windows auto-repeat resends Press, not Repeat).
     inert_key: Option<KeyCode>,
     /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN` after it.
@@ -108,7 +108,7 @@ impl App {
             scramble: scramble::generate(puzzle),
             status_msg: None,
             show_help: false,
-            show_sessions: false,
+            sessions_overlay: None,
             times_selected: 0,
             solve_detail: None,
             should_quit: false,
@@ -120,7 +120,6 @@ impl App {
             stats: SessionStats::default(),
             pbs: PersonalBests::default(),
             inspection_start: None,
-            bell_pending: false,
             inert_key: None,
             stopped_at: None,
         };
@@ -184,11 +183,6 @@ impl App {
         self.times_selected = 0;
     }
 
-    /// Take the queued judge-call bell, if any. `main.rs` sounds it; nothing else may.
-    pub fn take_bell(&mut self) -> bool {
-        std::mem::take(&mut self.bell_pending)
-    }
-
     /// Persist to disk. Never panics; failures surface in `status_msg`.
     fn save_now(&mut self) {
         if let Err(e) = storage::save(&self.data_path, &self.save) {
@@ -204,7 +198,7 @@ impl App {
     fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
         if self.show_help {
-            self.show_sessions = false;
+            self.sessions_overlay = None;
         }
     }
 
@@ -215,7 +209,6 @@ impl App {
         self.pending_inspection_penalty = Penalty::None;
         self.inspection_remaining = Some(INSPECTION_SECS);
         self.inspection_stage = 0;
-        self.bell_pending = false;
         self.display_millis = 0;
         self.status_msg = None;
     }
@@ -226,7 +219,6 @@ impl App {
         self.inspection_remaining = None;
         self.pending_inspection_penalty = Penalty::None;
         self.inspection_stage = 0;
-        self.bell_pending = false;
         self.display_millis = 0;
     }
 
@@ -325,19 +317,14 @@ impl App {
             Penalty::None
         };
 
-        // The stage doubles as the record of which calls have already sounded, so each
-        // threshold rings once per inspection however many ticks land on top of it.
-        let stage = if elapsed >= INSPECTION_CALL_12_MS {
+        // The judge calls are silent: `ui` reads the stage for the countdown's colour and caption.
+        self.inspection_stage = if elapsed >= INSPECTION_CALL_12_MS {
             2
         } else if elapsed >= INSPECTION_CALL_8_MS {
             1
         } else {
             0
         };
-        if stage > self.inspection_stage {
-            self.inspection_stage = stage;
-            self.bell_pending = true;
-        }
     }
 
     // -------------------------------------------------------------------- key
@@ -381,6 +368,14 @@ impl App {
             return;
         }
 
+        // The sessions overlay is modal too, and the solve overlay outranks it.
+        if self.sessions_overlay.is_some() {
+            if key.kind == KeyEventKind::Press {
+                self.on_key_sessions(key);
+            }
+            return;
+        }
+
         if self.input_mode == InputMode::Command {
             if key.kind == KeyEventKind::Press {
                 self.on_command_key(key);
@@ -419,19 +414,21 @@ impl App {
                 }
                 KeyCode::Char('h') | KeyCode::Char('?') => self.toggle_help(),
                 KeyCode::Esc => {
-                    if self.show_help || self.show_sessions {
+                    if self.show_help {
                         self.show_help = false;
-                        self.show_sessions = false;
                     } else {
                         self.status_msg = None;
                     }
                 }
-                KeyCode::Up | KeyCode::Char('k') => self.select_newer(1),
-                KeyCode::Down | KeyCode::Char('j') => self.select_older(1),
-                KeyCode::PageUp => self.select_newer(TIMES_PAGE),
-                KeyCode::PageDown => self.select_older(TIMES_PAGE),
-                KeyCode::Home => self.times_selected = 0,
-                KeyCode::Enter => self.open_solve_detail(),
+                // The times cursor and the detail overlay are selection state, not timer state.
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::Enter
+                | KeyCode::Char('k')
+                | KeyCode::Char('j') => self.on_key_times(key),
                 _ => {}
             },
             KeyEventKind::Release => {
@@ -441,52 +438,6 @@ impl App {
             }
             KeyEventKind::Repeat => {}
         }
-    }
-
-    // --------------------------------------------------------- the times list
-
-    /// Move the cursor toward newer solves; 0 is the newest and it stops there.
-    fn select_newer(&mut self, by: usize) {
-        self.times_selected = self.times_selected.saturating_sub(by);
-    }
-
-    /// Move the cursor toward older solves, clamped to the oldest one in the session.
-    fn select_older(&mut self, by: usize) {
-        let oldest = self.current_session().solves.len().saturating_sub(1);
-        self.times_selected = self.times_selected.saturating_add(by).min(oldest);
-    }
-
-    /// Open the detail overlay on the selected solve. An empty session has nothing to show.
-    fn open_solve_detail(&mut self) {
-        let count = self.current_session().solves.len();
-        if count == 0 {
-            return;
-        }
-        self.solve_detail = Some(self.times_selected.min(count - 1));
-    }
-
-    fn on_key_solve_detail(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('r') => self.recall_scramble(),
-            KeyCode::Esc | KeyCode::Enter => self.solve_detail = None,
-            _ => {}
-        }
-    }
-
-    /// Put the open solve's scramble back on screen for another attempt, and close the overlay.
-    fn recall_scramble(&mut self) {
-        let Some(index) = self.solve_detail else {
-            return;
-        };
-        let count = self.current_session().solves.len();
-        let Some(position) = count.checked_sub(index + 1) else {
-            self.solve_detail = None;
-            return;
-        };
-        self.scramble = self.current_session().solves[position].scramble.clone();
-        self.solve_detail = None;
-        // The overlay is numbered like the times list, where the newest solve is `count`.
-        self.status(format!("scramble loaded from solve {}", count - index));
     }
 
     fn on_key_inspecting(&mut self, key: KeyEvent) {
@@ -805,59 +756,51 @@ mod tests {
     // ---------------------------------------------------------- judge calls
 
     #[test]
-    fn each_judge_call_rings_exactly_once() {
-        let (mut app, _g) = test_app("insp-bell");
+    fn the_stage_advances_at_eight_and_twelve_seconds() {
+        let (mut app, _g) = test_app("insp-stage");
         app.save.settings.inspection = true;
         app.on_key(press(SPACE));
         app.on_key(release(SPACE));
         assert!(matches!(app.state, TimerState::Inspecting { .. }));
-        assert_eq!(app.inspection_stage, 0);
-        assert!(!app.take_bell(), "inspection starts silent");
+        assert_eq!(app.inspection_stage, 0, "inspection starts before the first call");
 
         set_inspection_started(&mut app, ago(ms(7_900)));
         app.on_tick();
         assert_eq!(app.inspection_stage, 0, "still under eight seconds");
-        assert!(!app.take_bell());
 
         set_inspection_started(&mut app, ago(ms(8_100)));
         app.on_tick();
-        assert_eq!(app.inspection_stage, 1);
-        assert!(app.take_bell(), "the eight second call rings");
-        assert!(!app.take_bell(), "take_bell clears what it returns");
+        assert_eq!(app.inspection_stage, 1, "the eight second call");
 
         set_inspection_started(&mut app, ago(ms(11_500)));
         app.on_tick();
         app.on_tick();
-        assert_eq!(app.inspection_stage, 1);
-        assert!(!app.take_bell(), "later ticks in the same stage stay silent");
+        assert_eq!(app.inspection_stage, 1, "later ticks stay in the same stage");
 
         set_inspection_started(&mut app, ago(ms(12_100)));
         app.on_tick();
-        assert_eq!(app.inspection_stage, 2);
-        assert!(app.take_bell(), "the twelve second call rings");
+        assert_eq!(app.inspection_stage, 2, "the twelve second call");
 
         set_inspection_started(&mut app, ago(ms(14_000)));
         app.on_tick();
         assert_eq!(app.inspection_stage, 2, "there is no third call");
-        assert!(!app.take_bell());
     }
 
     #[test]
-    fn the_calls_keep_coming_while_armed_from_inspection() {
-        let (mut app, _g) = test_app("insp-bell-armed");
+    fn the_stage_keeps_advancing_while_armed_from_inspection() {
+        let (mut app, _g) = test_app("insp-stage-armed");
         app.inspection_start = Some(ago(ms(8_200)));
         app.state = TimerState::Armed {
             since: Instant::now(),
             from_inspection: true,
         };
         app.on_tick();
-        assert_eq!(app.inspection_stage, 1);
-        assert!(app.take_bell(), "the clock is still running while armed");
+        assert_eq!(app.inspection_stage, 1, "the clock is still running while armed");
     }
 
     #[test]
-    fn cancelling_inspection_resets_the_stage_and_the_pending_bell() {
-        let (mut app, _g) = test_app("insp-bell-reset");
+    fn cancelling_inspection_resets_the_stage() {
+        let (mut app, _g) = test_app("insp-stage-reset");
         app.save.settings.inspection = true;
         set_inspection_started(&mut app, ago(ms(12_500)));
         app.on_tick();
@@ -866,9 +809,8 @@ mod tests {
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.state, TimerState::Idle);
         assert_eq!(app.inspection_stage, 0);
-        assert!(!app.take_bell(), "a cancelled inspection leaves nothing queued");
 
-        // A fresh inspection starts from stage 0 and calls again.
+        // A fresh inspection starts from stage 0 and climbs again.
         app.on_key(press(SPACE));
         app.on_key(release(SPACE));
         assert!(matches!(app.state, TimerState::Inspecting { .. }));
@@ -876,7 +818,6 @@ mod tests {
         set_inspection_started(&mut app, ago(ms(8_500)));
         app.on_tick();
         assert_eq!(app.inspection_stage, 1);
-        assert!(app.take_bell());
     }
 
     #[test]
@@ -1127,303 +1068,6 @@ mod tests {
         assert!(app.status_msg.is_none());
     }
 
-    #[test]
-    fn esc_closes_the_sessions_overlay_and_help_replaces_it() {
-        let (mut app, _g) = test_app("key-sessions");
-        app.show_sessions = true;
-        app.status_msg = Some("something".to_string());
-
-        // The two popups are alternatives, so 'h' takes the screen from the listing.
-        app.on_key(press(KeyCode::Char('h')));
-        assert!(app.show_help, "'h' still opens the help");
-        assert!(!app.show_sessions, "and closes the sessions overlay");
-        app.on_key(press(KeyCode::Char('?')));
-        assert!(!app.show_help, "'?' still closes it");
-        assert!(!app.show_sessions);
-
-        app.show_sessions = true;
-        app.on_key(press(KeyCode::Esc));
-        assert!(!app.show_sessions, "Esc closes the sessions overlay");
-        assert_eq!(
-            app.status_msg.as_deref(),
-            Some("something"),
-            "and stops there, exactly as it does for the help"
-        );
-        app.on_key(press(KeyCode::Esc));
-        assert!(app.status_msg.is_none());
-    }
-
-    #[test]
-    fn the_sessions_overlay_is_not_modal() {
-        // It behaves like the help overlay, which the keys behind it ignore entirely.
-        let (mut app, _g) = test_app("key-sessions-nonmodal");
-        app.show_sessions = true;
-        let before = app.scramble.clone();
-
-        app.on_key(press(KeyCode::Char('n')));
-        assert_ne!(app.scramble, before, "'n' still re-scrambles");
-        assert!(app.show_sessions, "and the overlay stays open");
-
-        app.on_key(press(SPACE));
-        assert!(matches!(app.state, TimerState::Armed { .. }), "space still arms");
-    }
-
-    // ------------------------------------------------------- the times cursor
-
-    #[test]
-    fn the_cursor_stays_at_zero_in_an_empty_session() {
-        let (mut app, _g) = test_app("select-empty");
-        assert!(app.current_session().solves.is_empty());
-        for key in [
-            KeyCode::Down,
-            KeyCode::Char('j'),
-            KeyCode::PageDown,
-            KeyCode::Up,
-            KeyCode::Char('k'),
-            KeyCode::PageUp,
-            KeyCode::Home,
-        ] {
-            app.on_key(press(key));
-            assert_eq!(app.times_selected, 0, "{key:?} must not move in an empty session");
-        }
-    }
-
-    #[test]
-    fn one_solve_leaves_the_cursor_nowhere_to_go() {
-        let (mut app, _g) = test_app("select-single");
-        add_solve(&mut app, 10_000);
-        for key in [KeyCode::Down, KeyCode::Char('j'), KeyCode::PageDown] {
-            app.on_key(press(key));
-            assert_eq!(app.times_selected, 0, "{key:?} has no older solve to reach");
-        }
-        app.on_key(press(KeyCode::Up));
-        assert_eq!(app.times_selected, 0);
-    }
-
-    #[test]
-    fn the_cursor_moves_toward_older_solves_and_back_again() {
-        let (mut app, _g) = test_app("select-move");
-        for i in 0..15 {
-            add_solve(&mut app, 10_000 + i);
-        }
-
-        app.on_key(press(KeyCode::Down));
-        assert_eq!(app.times_selected, 1, "Down moves toward older solves");
-        app.on_key(press(KeyCode::Char('j')));
-        assert_eq!(app.times_selected, 2);
-        app.on_key(press(KeyCode::Up));
-        assert_eq!(app.times_selected, 1, "Up moves back toward the newest");
-        app.on_key(press(KeyCode::Char('k')));
-        assert_eq!(app.times_selected, 0);
-        app.on_key(press(KeyCode::Char('k')));
-        assert_eq!(app.times_selected, 0, "0 is the newest and the cursor stops there");
-
-        app.on_key(press(KeyCode::PageDown));
-        assert_eq!(app.times_selected, 10, "PageDown jumps ten toward the oldest");
-        app.on_key(press(KeyCode::PageDown));
-        assert_eq!(app.times_selected, 14, "and clamps to the oldest solve");
-        app.on_key(press(KeyCode::PageUp));
-        assert_eq!(app.times_selected, 4);
-        app.on_key(press(KeyCode::PageUp));
-        assert_eq!(app.times_selected, 0, "PageUp clamps at the newest");
-
-        app.on_key(press(KeyCode::Down));
-        app.on_key(press(KeyCode::Home));
-        assert_eq!(app.times_selected, 0, "Home returns to the newest");
-    }
-
-    #[test]
-    fn a_new_solve_resets_the_cursor() {
-        let (mut app, _g) = test_app("select-reset-solve");
-        for i in 0..4 {
-            add_solve(&mut app, 10_000 + i);
-        }
-        app.on_key(press(KeyCode::Down));
-        app.on_key(press(KeyCode::Down));
-        assert_eq!(app.times_selected, 2);
-
-        perform_solve(&mut app);
-        assert_eq!(app.times_selected, 0, "a recorded solve brings the cursor home");
-    }
-
-    #[test]
-    fn every_session_change_resets_the_cursor() {
-        let (mut app, _g) = test_app("select-reset-session");
-        for i in 0..4 {
-            add_solve(&mut app, 10_000 + i);
-        }
-
-        app.times_selected = 3;
-        run_command(&mut app, "2x2");
-        assert_eq!(app.times_selected, 0, "a puzzle switch resets the cursor");
-
-        app.times_selected = 2;
-        run_command(&mut app, "session 1");
-        assert_eq!(app.times_selected, 0, "a session switch resets the cursor");
-
-        app.times_selected = 2;
-        run_command(&mut app, "new evening");
-        assert_eq!(app.times_selected, 0, "a new session resets the cursor");
-
-        app.times_selected = 2;
-        run_command(&mut app, "skewb");
-        assert_eq!(app.times_selected, 0, "retyping in place resets the cursor");
-
-        app.times_selected = 2;
-        run_command(&mut app, "delsession");
-        assert_eq!(app.times_selected, 0, "deleting the active session resets the cursor");
-    }
-
-    // ---------------------------------------------------- solve detail overlay
-
-    #[test]
-    fn enter_opens_the_overlay_on_the_selected_solve() {
-        let (mut app, _g) = test_app("detail-open");
-        for i in 1..=3 {
-            add_solve(&mut app, 10_000 + i);
-        }
-        app.on_key(press(KeyCode::Down));
-        assert_eq!(app.times_selected, 1);
-
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, Some(1), "the overlay opens on the cursor");
-        assert_eq!(app.state, TimerState::Idle, "opening it disturbs no timer state");
-        assert_eq!(app.display_millis, 0);
-    }
-
-    #[test]
-    fn enter_opens_nothing_in_an_empty_session() {
-        let (mut app, _g) = test_app("detail-empty");
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, None);
-    }
-
-    #[test]
-    fn the_overlay_does_not_open_mid_solve() {
-        let (mut app, _g) = test_app("detail-mid-solve");
-        add_solve(&mut app, 10_000);
-        app.save.settings.inspection = true;
-
-        app.on_key(press(SPACE));
-        app.on_key(release(SPACE));
-        assert!(matches!(app.state, TimerState::Inspecting { .. }));
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, None, "Enter is inert during inspection");
-        assert!(matches!(app.state, TimerState::Inspecting { .. }));
-
-        app.on_key(press(SPACE));
-        assert!(matches!(app.state, TimerState::Armed { .. }));
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, None, "Enter is inert while armed");
-        assert!(matches!(app.state, TimerState::Armed { .. }));
-
-        app.state = TimerState::Timing {
-            started: ago(ms(5_000)),
-        };
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, None, "Enter is inert while timing");
-        assert_eq!(app.state, TimerState::Idle, "it stops the timer instead");
-        assert_eq!(app.current_session().solves.len(), 2);
-    }
-
-    #[test]
-    fn the_overlay_swallows_every_key_but_its_own() {
-        let (mut app, _g) = test_app("detail-swallow");
-        add_solve(&mut app, 10_000);
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, Some(0));
-
-        app.on_key(press(SPACE));
-        assert_eq!(app.state, TimerState::Idle, "space must not arm behind the overlay");
-        app.on_key(release(SPACE));
-        assert_eq!(app.state, TimerState::Idle);
-
-        app.on_key(press(KeyCode::Char('q')));
-        assert!(!app.should_quit, "q must not quit behind the overlay");
-
-        app.on_key(press(KeyCode::Char('/')));
-        assert_eq!(app.input_mode, InputMode::Normal, "'/' must not open command mode");
-
-        let scramble = app.scramble.clone();
-        app.on_key(press(KeyCode::Char('n')));
-        assert_eq!(app.scramble, scramble, "'n' must not re-scramble");
-
-        app.on_key(press(KeyCode::Down));
-        assert_eq!(app.times_selected, 0, "the cursor does not move behind the overlay");
-        assert_eq!(app.solve_detail, Some(0), "and the overlay is still open");
-
-        // Ctrl-C is checked before the overlay, so it is still the escape hatch.
-        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(app.should_quit);
-    }
-
-    #[test]
-    fn esc_and_enter_close_the_overlay() {
-        let (mut app, _g) = test_app("detail-close");
-        add_solve(&mut app, 10_000);
-
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, Some(0));
-        app.on_key(press(KeyCode::Esc));
-        assert_eq!(app.solve_detail, None, "Esc closes it");
-
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, Some(0));
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, None, "Enter closes it too");
-
-        // Closing with Esc leaves the help overlay and the status alone.
-        assert!(!app.show_help);
-    }
-
-    #[test]
-    fn r_recalls_the_scramble_of_the_open_solve() {
-        let (mut app, _g) = test_app("detail-recall");
-        for i in 1..=3 {
-            add_solve_with(&mut app, 10_000 + i, &format!("SCRAMBLE {}", i));
-        }
-
-        // One step older than the newest: index 1, which the list numbers 2 of 3.
-        app.on_key(press(KeyCode::Down));
-        app.on_key(press(KeyCode::Enter));
-        assert_eq!(app.solve_detail, Some(1));
-
-        app.on_key(press(KeyCode::Char('r')));
-        assert_eq!(app.scramble, "SCRAMBLE 2");
-        assert_eq!(app.solve_detail, None, "recalling closes the overlay");
-        assert_eq!(
-            app.status_msg.as_deref(),
-            Some("scramble loaded from solve 2")
-        );
-
-        // The next solve is recorded against the recalled scramble.
-        start_timing_now(&mut app);
-        app.state = TimerState::Timing {
-            started: ago(ms(4_000)),
-        };
-        app.on_key(press(KeyCode::Char('x')));
-        let last = app.current_session().solves.last().expect("solve recorded");
-        assert_eq!(last.scramble, "SCRAMBLE 2");
-        assert_eq!(app.times_selected, 0);
-        assert_ne!(app.scramble, "SCRAMBLE 2", "and a fresh scramble follows it");
-    }
-
-    #[test]
-    fn the_newest_solve_recalls_under_its_own_number() {
-        let (mut app, _g) = test_app("detail-recall-newest");
-        for i in 1..=3 {
-            add_solve_with(&mut app, 10_000 + i, &format!("SCRAMBLE {}", i));
-        }
-        app.on_key(press(KeyCode::Enter));
-        app.on_key(press(KeyCode::Char('r')));
-        assert_eq!(app.scramble, "SCRAMBLE 3");
-        assert_eq!(
-            app.status_msg.as_deref(),
-            Some("scramble loaded from solve 3"),
-            "the newest solve is numbered by the solve count"
-        );
-    }
-
     // ------------------------------------------------------------ constructor
 
     #[test]
@@ -1472,14 +1116,6 @@ mod tests {
             "app.pbs went stale {}",
             when
         );
-    }
-
-    /// Record a solve through the real path, then clear the guards a user clears by waiting.
-    fn perform_solve(app: &mut App) {
-        start_timing_now(app);
-        app.on_key(press(KeyCode::Char('x')));
-        app.on_key(release(KeyCode::Char('x')));
-        app.stopped_at = None;
     }
 
     #[test]

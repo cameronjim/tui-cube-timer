@@ -24,9 +24,10 @@ rule 1 support each other:
 - **I/O** goes through one module with a path parameter. Point that parameter somewhere
   disposable and it is just a function again.
 - **Rendering** used to be the exception. It is now split: the geometry moved into
-  `ui/layout.rs`, which is pure arithmetic and tested like any other pure module, and what
-  remains in `ui/mod.rs` is driven through ratatui's `TestBackend`. What is asserted about
-  the resulting frame is still modest. See below.
+  `ui/layout.rs`, which is pure arithmetic and tested like any other pure module, and the
+  three drawing files (`ui/mod.rs`, `ui/timer.rs`, `ui/overlay.rs`) are driven through
+  ratatui's `TestBackend`. What is asserted about the resulting frame is still modest. See
+  below.
 
 The general shape to aim for: if something is hard to test, that is usually a boundary
 problem, not a testing problem. Move the clock read, the file path or the event source out
@@ -43,30 +44,32 @@ directly.
 A test lives with its subject, which means a split moves tests as well as code. Where two
 files inside one directory need the same scaffolding, it goes in a `#[cfg(test)] mod
 testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `release`,
-`run_command` and friends for all three files of `app/`, and a private `mod testkit` at the
-bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for both renderers. Never
-duplicate a helper across sibling files.
+`run_command`, `perform_solve` and friends for all four files of `app/`, and a private `mod
+testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for all
+three renderers. Never duplicate a helper across sibling files.
 
-Current state, 308 tests, all green:
+Current state, 320 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `app/mod.rs` | 55 | State machine, keys, inspection and judge calls, the times cursor, the three popups, the derived cache |
 | `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
+| `app/mod.rs` | 41 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
+| `ui/layout.rs` | 35 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing |
 | `app/commands.rs` | 33 | Every `/command`, its arguments, its refusals and its persistence |
-| `ui/layout.rs` | 32 | Panel heights, word wrap, the header cap, popup packing |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
+| `app/selection.rs` | 20 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
-| `ui/mod.rs` | 12 | Render smoke at four sizes, one content anchor |
+| `ui/mod.rs` | 10 | Render smoke at four sizes, the chrome anchor, the stats prefix column |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
+| `ui/overlay.rs` | 9 | All three popups at four sizes, clamping, the cursor, which one wins |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
 | `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
-| `ui/overlay.rs` | 8 | All three popups at four sizes, clamping, which one wins |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
 | `scramble/mod.rs` | 5 | Every puzzle dispatches, is non-empty and is seed-stable |
+| `ui/timer.rs` | 4 | The block font, `hide_time`, the stage colours and captions, penalty precedence |
 
 The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
 each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a generator for
@@ -254,15 +257,23 @@ squinting.
 **Drawing is smoke-tested through `TestBackend`.** `render(app, w, h)` draws one frame into
 a ratatui `TestBackend` and returns every cell's symbol as a string. The tests sweep four
 sizes, `(80,30)`, `(44,12)`, `(30,8)` and `(10,4)`, over every puzzle, empty and populated,
-plus the help and sessions overlays, command mode, a status message, a 60-character session name, a solve
-over an hour, and a times scroll past the end of the list.
+plus the help and sessions popups, command mode, a status message, a 60-character session
+name, a solve over an hour, and a times scroll past the end of the list. The helpers live in
+`ui/mod.rs`'s `testkit` and are shared by all three drawing files.
 
 Be clear about what that buys. For most of these, **not panicking is the assertion**. That
 is the genuine rendering risk and the sweep is a real guard against it, but it is not a
 claim that the frame looks right. One test,
 `a_normal_frame_actually_draws_its_chrome`, anchors the rest by asserting the buffer
 actually contains `cubetimer`, `3x3`, `stats` and `times`, so a `draw` that silently wrote
-nothing cannot pass the whole file. Beyond that anchor, content is not asserted.
+nothing cannot pass the whole file.
+
+A handful of tests go past the anchor, and they are the ones where a wrong cell means a
+wrong reading rather than an ugly one: `cells_colored` and `row_cells` let `ui/timer.rs`
+assert that stage 1 recolours the countdown *and* draws `8s` in that same colour, and that a
+`+2` takes the slot and the red back off it; `rows_of` lets `ui/mod.rs` assert the three
+stats rows start their values in the same column. Colour and column alignment carry meaning
+here, so they are asserted directly. Beyond those, content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
 moving is higher than the bug rate it would catch, and the pieces where a wrong value would

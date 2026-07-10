@@ -2,11 +2,12 @@
 //!
 //! Every value shown is already on `App`, including the statistics: this runs on the 15 ms
 //! tick, so it reads and never computes. The geometry lives in [`layout`], and is saturating
-//! throughout so tiny terminals degrade instead of panicking. The popups drawn on top of the
-//! frame live in [`overlay`].
+//! throughout so tiny terminals degrade instead of panicking. The big countdown in the middle
+//! is [`timer`], and the popups drawn on top of the frame live in [`overlay`].
 
 mod layout;
 mod overlay;
+mod timer;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -14,9 +15,13 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, InputMode, TimerState};
+use crate::app::{App, InputMode};
 use crate::types::{format_millis, format_solve, Penalty};
-use layout::{fit_count, footer_height, header_height, inner_of, times_window, STAT_SEP};
+use layout::{
+    fit_count, footer_height, header_height, inner_of, list_window, stat_budget, STAT_PREFIX_W,
+    STAT_SEP,
+};
+use timer::draw_timer;
 
 // ---------------------------------------------------------------- palette
 
@@ -33,9 +38,6 @@ const C_WORST: Color = Color::Red;
 const C_STAGE1: Color = Color::LightMagenta;
 /// Inspection past twelve seconds.
 const C_STAGE2: Color = Color::LightRed;
-
-/// Stands in for the running time when `hide_time` is on; the block font has a `'.'` glyph.
-const HIDDEN_TIME: &str = "...";
 
 fn dim() -> Style {
     Style::default().fg(C_LABEL)
@@ -82,8 +84,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // One overlay at a time, and the detail popup is the one the user just asked for.
     if let Some(index) = app.solve_detail {
         overlay::draw_detail(frame, app, index, area);
-    } else if app.show_sessions {
-        overlay::draw_sessions(frame, app, area);
+    } else if let Some(cursor) = app.sessions_overlay {
+        overlay::draw_sessions(frame, app, cursor, area);
     } else if app.show_help {
         overlay::draw_help(frame, area);
     }
@@ -168,188 +170,32 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-// -------------------------------------------------------------- big timer
-
-/// What the big area shows now: glyph string, colour, optional penalty caption, state caption.
-fn timer_view(app: &App) -> (String, Color, Option<String>, &'static str) {
-    match app.state {
-        TimerState::Idle => (
-            format_millis(app.display_millis),
-            C_IDLE,
-            None,
-            "ready, hold space",
-        ),
-        TimerState::Inspecting { .. } => {
-            let remaining = app.inspection_remaining.unwrap_or(15);
-            // The stage is decided by `app`, so the two warning colours cannot drift from it.
-            let stage_color = match app.inspection_stage {
-                0 => C_INSPECT,
-                1 => C_STAGE1,
-                _ => C_STAGE2,
-            };
-            // `remaining` counts 15..0 then negative: <= 0 is past 15s (+2), <= -2 is past 17s (DNF).
-            let (penalty, color) = if remaining <= -2 {
-                (Some("DNF".to_string()), Color::Red)
-            } else if remaining <= 0 {
-                (Some("+2".to_string()), Color::Red)
-            } else {
-                (None, stage_color)
-            };
-            let shown = if remaining > 0 { remaining } else { 0 };
-            (shown.to_string(), color, penalty, "inspecting")
-        }
-        TimerState::Armed { .. } => {
-            if app.armed_ready() {
-                (
-                    format_millis(app.display_millis),
-                    C_READY,
-                    None,
-                    "release to start",
-                )
-            } else {
-                (
-                    format_millis(app.display_millis),
-                    C_ARMED,
-                    None,
-                    "keep holding…",
-                )
-            }
-        }
-        TimerState::Timing { .. } => {
-            // Hiding the running time is a practice aid, so only the run itself is masked:
-            // the result is on screen the moment the timer stops.
-            let shown = if app.save.settings.hide_time {
-                HIDDEN_TIME.to_string()
-            } else {
-                format_millis(app.display_millis)
-            };
-            (shown, C_TIMING, None, "solving, any key stops")
-        }
-    }
-}
-
-fn draw_timer(frame: &mut Frame, app: &App, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let block = panel("");
-    let inner = inner_of(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let (text, color, penalty, caption) = timer_view(app);
-    let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-
-    let mut body: Vec<Line> = Vec::new();
-    let big = big_text(&text);
-    let big_w = big
-        .first()
-        .map(|r| r.chars().count())
-        .unwrap_or(0)
-        .min(u16::MAX as usize) as u16;
-
-    if inner.height >= GLYPH_H as u16 && big_w <= inner.width && big_w > 0 {
-        for row in big {
-            body.push(Line::styled(row, style));
-        }
-    } else {
-        // Not enough room for the block font: plain (still bold/coloured) text.
-        body.push(Line::styled(text, style));
-    }
-
-    if let Some(p) = penalty {
-        body.push(Line::from(""));
-        body.push(Line::styled(
-            p,
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
-    }
-    if inner.height as usize >= body.len() + 2 {
-        body.push(Line::from(""));
-        body.push(Line::styled(caption, dim()));
-    }
-
-    // Vertical centering via leading blank lines.
-    let pad = (inner.height as usize).saturating_sub(body.len()) / 2;
-    let mut lines: Vec<Line> = Vec::with_capacity(body.len() + pad);
-    for _ in 0..pad {
-        lines.push(Line::from(""));
-    }
-    lines.extend(body);
-
-    let p = Paragraph::new(Text::from(lines)).alignment(Alignment::Center);
-    frame.render_widget(p, inner);
-}
-
-// ------------------------------------------------------- 5-row block font
-
-const GLYPH_H: usize = 5;
-
-/// Rows of one glyph; unknown chars render blank so odd input can never mis-align rows.
-fn glyph(c: char) -> [&'static str; GLYPH_H] {
-    match c {
-        '0' => ["████", "█  █", "█  █", "█  █", "████"],
-        '1' => ["   █", "   █", "   █", "   █", "   █"],
-        '2' => ["████", "   █", "████", "█   ", "████"],
-        '3' => ["████", "   █", "████", "   █", "████"],
-        '4' => ["█  █", "█  █", "████", "   █", "   █"],
-        '5' => ["████", "█   ", "████", "   █", "████"],
-        '6' => ["████", "█   ", "████", "█  █", "████"],
-        '7' => ["████", "   █", "   █", "   █", "   █"],
-        '8' => ["████", "█  █", "████", "█  █", "████"],
-        '9' => ["████", "█  █", "████", "   █", "████"],
-        ':' => ["  ", "██", "  ", "██", "  "],
-        '.' => ["  ", "  ", "  ", "  ", "██"],
-        '-' => ["    ", "    ", "████", "    ", "    "],
-        '+' => ["    ", " ██ ", "████", " ██ ", "    "],
-        _ => ["  ", "  ", "  ", "  ", "  "],
-    }
-}
-
-/// Render `s` into `GLYPH_H` equal-width rows, one space between glyphs.
-fn big_text(s: &str) -> Vec<String> {
-    let mut rows: Vec<String> = vec![String::new(); GLYPH_H];
-    for (i, c) in s.chars().enumerate() {
-        let g = glyph(c);
-        for (r, cell) in rows.iter_mut().zip(g.iter()) {
-            if i > 0 {
-                r.push(' ');
-            }
-            r.push_str(cell);
-        }
-    }
-    rows
-}
-
 // ------------------------------------------------- stats + personal bests
 
 fn opt_time(v: Option<u64>) -> String {
     v.map(format_millis).unwrap_or_else(|| "-".to_string())
 }
 
-/// One row of the stats strip: `label value` entries packed left to right into `width` columns.
+/// One row of the stats strip: a prefix, then `label value` entries packed into `width` columns.
 ///
-/// The strip has three rows and no more, so a row that cannot hold everything it was given
-/// drops entries from the right rather than wrapping into the row below.
+/// The prefix names what the whole row is, and an empty one still holds its column so the three
+/// rows line up. The strip has three rows and no more, so a row that cannot hold everything it
+/// was given drops entries from the right rather than wrapping into the row below.
 fn stat_row(
-    prefix: Option<&'static str>,
+    prefix: &'static str,
     entries: Vec<(&'static str, String, Color)>,
     width: u16,
 ) -> Line<'static> {
-    let lead = prefix.map_or(0u16, |p| p.chars().count().saturating_add(1) as u16);
     let widths: Vec<usize> = entries
         .iter()
         .map(|(label, value, _)| label.chars().count() + 1 + value.chars().count())
         .collect();
-    let keep = fit_count(&widths, width.saturating_sub(lead));
+    let keep = fit_count(&widths, stat_budget(width));
 
-    let mut spans: Vec<Span> = Vec::new();
-    if let Some(p) = prefix {
-        spans.push(Span::styled(p, dim()));
-        spans.push(Span::raw(" "));
-    }
+    let mut spans: Vec<Span> = vec![Span::styled(
+        format!("{:<width$} ", prefix, width = STAT_PREFIX_W),
+        dim(),
+    )];
     for (i, (label, value, color)) in entries.into_iter().take(keep).enumerate() {
         if i > 0 {
             spans.push(Span::raw(" ".repeat(STAT_SEP)));
@@ -369,8 +215,10 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     let pb = &app.pbs;
     let width = area.width.saturating_sub(2);
 
+    // The first row is what the session is doing now, which only reads against the `pb` row below
+    // once it says so.
     let averages = stat_row(
-        None,
+        "now",
         vec![
             ("mo3", st.mo3.display(), C_TIMING),
             ("ao5", st.ao5.display(), C_TIMING),
@@ -381,7 +229,7 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         width,
     );
     let session = stat_row(
-        None,
+        "",
         vec![
             ("best", opt_time(st.best), C_BEST),
             ("worst", opt_time(st.worst), C_WORST),
@@ -395,7 +243,7 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         width,
     );
     let bests = stat_row(
-        Some("pb"),
+        "pb",
         vec![
             ("single", opt_time(pb.single), C_ACCENT),
             ("mo3", opt_time(pb.mo3), C_ACCENT),
@@ -446,7 +294,7 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Newest first, so both ends of the window count from the newest solve.
-    let (start, len) = times_window(selected, total, inner.height as usize);
+    let (start, len) = list_window(selected, total, inner.height as usize);
     let mut lines: Vec<Line> = Vec::with_capacity(len);
 
     for (offset, solve) in solves.iter().rev().skip(start).take(len).enumerate() {
@@ -521,7 +369,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 mod testkit {
     use super::{draw, App};
     use crate::types::{Penalty, Puzzle, SaveFile, Solve};
-    use ratatui::buffer::Buffer;
+    use ratatui::buffer::{Buffer, Cell};
     use ratatui::style::Color;
 
     /// The sizes every smoke test sweeps: comfortable, narrow, short, and absurd.
@@ -588,6 +436,33 @@ mod testkit {
         buffer.content().iter().filter(|c| c.fg == color).count()
     }
 
+    /// The frame split into one string per row, which is how alignment and cursors read.
+    pub(super) fn rows_of(buffer: &Buffer) -> Vec<String> {
+        let width = buffer.area.width as usize;
+        if width == 0 {
+            return Vec::new();
+        }
+        buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect()
+    }
+
+    /// Index of the first row containing `needle`, to assert how that row is styled.
+    pub(super) fn row_with(buffer: &Buffer, needle: &str) -> usize {
+        rows_of(buffer)
+            .iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("no row of the frame contains {:?}", needle))
+    }
+
+    /// The cells of row `y`, in order.
+    pub(super) fn row_cells(buffer: &Buffer, y: usize) -> Vec<&Cell> {
+        let width = buffer.area.width as usize;
+        buffer.content().iter().skip(y * width).take(width).collect()
+    }
+
     /// Draw at all four sizes.
     pub(super) fn render_all(app: &App) {
         for (w, h) in SIZES {
@@ -600,10 +475,24 @@ mod testkit {
 
 #[cfg(test)]
 mod tests {
-    use super::testkit::{app_with, cells_colored, mega, render, render_all, render_buffer};
+    use super::testkit::{app_with, mega, render, render_all, render_buffer, rows_of};
     use super::*;
+    use crate::app::TimerState;
     use crate::types::Puzzle;
     use std::time::Instant;
+
+    /// The text of a [`Line`], span by span, for the rows built outside a [`Frame`].
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// The column `label` starts at, counted in characters so the box drawing does not skew it.
+    fn label_col(row: &str, label: &str) -> usize {
+        let byte = row
+            .find(label)
+            .unwrap_or_else(|| panic!("{:?} is missing from {:?}", label, row));
+        row[..byte].chars().count()
+    }
 
     #[test]
     fn a_normal_frame_actually_draws_its_chrome() {
@@ -684,63 +573,58 @@ mod tests {
     }
 
     #[test]
-    fn hiding_the_time_masks_the_running_solve_but_not_the_result() {
-        let mut app = app_with(Puzzle::Cube3, 4);
-        app.state = TimerState::Timing {
-            started: Instant::now(),
+    fn a_stats_row_pays_for_its_prefix_column_before_packing_entries() {
+        let entries = || {
+            vec![
+                ("ao5", "10.00".to_string(), C_TIMING),
+                ("ao12", "11.00".to_string(), C_TIMING),
+            ]
         };
-        app.display_millis = 12_340;
-
-        let visible = render(&app, 80, 30).matches('█').count();
-        app.save.settings.hide_time = true;
-        let hidden = render(&app, 80, 30).matches('█').count();
-        // Three dots are one glyph row of two cells each, and nothing else in the frame is a block.
-        assert_eq!(hidden, 6, "only the three dots survive, got {} blocks", hidden);
-        assert!(visible > hidden, "the digits were drawn before, got {}", visible);
-        render_all(&app);
-
-        // Back in Idle the finished time is on screen as usual.
-        app.state = TimerState::Idle;
-        assert!(render(&app, 80, 30).matches('█').count() > 6);
+        // Four columns of prefix, "ao5 10.00" in nine, three between, "ao12 11.00" in ten.
+        assert_eq!(
+            line_text(&stat_row("now", entries(), 26)),
+            "now ao5 10.00   ao12 11.00"
+        );
+        assert_eq!(
+            line_text(&stat_row("now", entries(), 25)),
+            "now ao5 10.00",
+            "one column short and the second entry goes"
+        );
+        assert_eq!(
+            line_text(&stat_row("", entries(), 26)),
+            "    ao5 10.00   ao12 11.00",
+            "an unlabelled row still holds the column"
+        );
+        assert_eq!(
+            line_text(&stat_row("pb", entries(), 0)),
+            "pb  ao5 10.00",
+            "a row with no room left still shows one entry"
+        );
     }
 
     #[test]
-    fn the_inspection_stages_recolour_the_countdown() {
-        let mut app = app_with(Puzzle::Pyraminx, 2);
-        app.state = TimerState::Inspecting {
-            started: Instant::now(),
+    fn the_stats_rows_name_themselves_and_line_up_under_each_other() {
+        let app = app_with(Puzzle::Cube3, 30);
+        let buffer = render_buffer(&app, 100, 30);
+        let rows = rows_of(&buffer);
+        let find = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no stats row holds {:?}", needle))
+                .clone()
         };
-        app.inspection_remaining = Some(5);
 
-        app.inspection_stage = 0;
-        assert_eq!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE1), 0);
-        app.inspection_stage = 1;
-        assert!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE1) > 0);
-        render_all(&app);
-        app.inspection_stage = 2;
-        assert!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE2) > 0);
-        render_all(&app);
-    }
-
-    #[test]
-    fn a_penalty_overrides_the_inspection_stage_colour() {
-        let mut app = app_with(Puzzle::Pyraminx, 2);
-        app.state = TimerState::Inspecting {
-            started: Instant::now(),
-        };
-        app.inspection_stage = 2;
-
-        for (remaining, caption) in [(0i64, "+2"), (-3, "DNF")] {
-            app.inspection_remaining = Some(remaining);
-            let buffer = render_buffer(&app, 80, 30);
-            let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
-            assert!(text.contains(caption), "the {} caption is drawn", caption);
-            assert_eq!(
-                cells_colored(&buffer, C_STAGE2),
-                0,
-                "the penalty red must win over the stage colour"
-            );
-        }
+        let now = find("now ");
+        let session = find("best");
+        let pb = find("pb  ");
+        assert!(now.contains("mo3"), "the rolling averages are the labelled row");
+        assert!(pb.contains("single"), "the personal bests keep their own label");
+        assert_eq!(
+            label_col(&now, "mo3"),
+            label_col(&session, "best"),
+            "the unlabelled row lines up with the labelled ones"
+        );
+        assert_eq!(label_col(&now, "mo3"), label_col(&pb, "single"));
     }
 
     #[test]
@@ -750,18 +634,6 @@ mod tests {
         app.command_buf = "/session 12345".to_string();
         render_all(&app);
         assert!(render(&app, 80, 30).contains("/session 12345"));
-    }
-
-    #[test]
-    fn a_solve_over_an_hour_renders_at_every_size() {
-        let mut app = app_with(Puzzle::Cube7, 4);
-        app.state = TimerState::Timing {
-            started: Instant::now(),
-        };
-        app.display_millis = 3_723_450;
-        render_all(&app);
-        // 62:03.45 is nine glyphs wide, so 80 columns still gets the block font.
-        assert!(render(&app, 80, 30).contains('█'));
     }
 
     #[test]

@@ -44,27 +44,38 @@ notation in common:
 | `clock.rs` | Fifteen dial tokens around a `y2` |
 
 `src/ui/` splits the same way, along the line between drawing and arithmetic. `mod.rs`
-holds `draw`, the panel renderers and the block font; `overlay.rs` holds the three popups,
-the help reference, the session list and one solve in full, which are the only things drawn
-over the frame rather than into it; `layout.rs` holds the pure geometry, meaning panel
-heights, word wrapping, popup placement, the visible slice of the times list and `inner_of`.
-Nothing in `layout.rs` sees a `Frame` or an `App`, which is what makes the degradation
-rules testable as ordinary functions rather than by eye.
+holds `draw`, the header, the stats strip, the times list and the status line; `timer.rs`
+holds the big countdown in the middle of the frame and the block font it is drawn in;
+`overlay.rs` holds the three popups, the help reference, the session picker and one solve in
+full, which are the only things drawn over the frame rather than into it; `layout.rs` holds
+the pure geometry, meaning panel heights, word wrapping, popup placement, the visible slice
+of a scrolling list and `inner_of`. Nothing in `layout.rs` sees a `Frame` or an `App`, which
+is what makes the degradation rules testable as ordinary functions rather than by eye.
+
+| File | Covers | Non-test lines |
+| --- | --- | --- |
+| `mod.rs` | `draw`, the palette, `panel`, the header, stats, times list and status line | 367 |
+| `timer.rs` | `timer_view`, `draw_timer`, `GLYPH_H` and the 5-row block font | 181 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 238 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, popup placement | 236 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
 the single `pub(super) fn on_command_key` and never touched from outside `app`.
+`selection.rs` is the state that says which solve or session you are pointing at, which the
+timer never reads: the times cursor, the solve-detail overlay and the sessions picker.
 `repair.rs` answers "is this save file internally consistent", which nothing in the timer
 flow ever asks, and is a handful of free functions over `&mut SaveFile` rather than `App`
 methods. The split is invisible from outside: `crate::app::App` and its public fields and
 methods keep the paths they had when `app` was one file.
 
-| File | Covers |
-| --- | --- |
-| `mod.rs` | `App`, `TimerState`, `InputMode`, key handling, tick, the times cursor and the detail overlay state |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler |
-| `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` |
-| `testkit.rs` | `#[cfg(test)]` scaffolding the other three share: `TempPath`, `test_app`, `press`, `run_command` |
+| File | Covers | Non-test lines |
+| --- | --- | --- |
+| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 475 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 303 |
+| `selection.rs` | `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 116 |
+| `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
+| `testkit.rs` | `#[cfg(test)]` scaffolding the other four share: `TempPath`, `test_app`, `press`, `run_command` | 137 |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
 to persistence or rendering never ripples into it. The dependency graph is acyclic and
@@ -111,46 +122,51 @@ numbers actually change, which is at most once per solve.
 The 64 MB read limit in `storage::load`, described under Persistence, is the other half
 of the same fix: it bounds how large the input can be before any of this runs.
 
-### Selection state, and the one output that is not a frame
+### Selection state and the judge-call stage
 
-Three more fields exist purely so the renderer has something to read:
+Four more fields exist purely so the renderer has something to read:
 
 ```rust
 /// Times-list cursor, counted from the newest solve: 0 is the newest.
 pub times_selected: usize,
 /// Open solve-detail overlay, holding the same index-from-newest as `times_selected`.
 pub solve_detail: Option<usize>,
+/// Open sessions overlay, holding the cursor's index into `save.sessions`.
+pub sessions_overlay: Option<usize>,
 /// Judge-call stage of the running inspection: 0 under 8s, 1 from 8s, 2 from 12s.
 pub inspection_stage: u8,
 ```
 
-Counting from the newest solve rather than by list position is what makes both indices
-survive a new solve arriving: index 0 is whatever is newest right now, and appending never
-renumbers anything the user is looking at. Deleting does, which is why `cmd_delete_solve`
-resets the cursor and closes the overlay outright rather than trying to fix them up.
-`ui` clamps both anyway, since the solve behind an index can vanish between the keypress
-and the frame.
+Counting from the newest solve rather than by list position is what makes the first two
+indices survive a new solve arriving: index 0 is whatever is newest right now, and appending
+never renumbers anything the user is looking at. Deleting does, which is why
+`cmd_delete_solve` resets the cursor and closes the overlay outright rather than trying to
+fix them up. `ui` clamps both anyway, since the solve behind an index can vanish between the
+keypress and the frame.
+
+`sessions_overlay` is the odd one of the three, and deliberately: it indexes
+`save.sessions` in the order they are drawn rather than counting from an end, because the
+session list is stable while the popup is open in a way the solve list is not. `ui` clamps
+it too.
 
 `inspection_stage` exists so the two warning colours cannot drift from the thresholds that
-produce them: `App::refresh_inspection` decides the stage and `ui::timer_view` does nothing
-but match on it. It doubles as the record of which calls have already fired, because it
-only ever increases within one inspection.
-
-The bell is the exception to "`App` state, `ui` renders". A judge call is audible, and
-sound is not a cell in a buffer, so `refresh_inspection` sets a private `bell_pending` flag
-and `main.rs` drains it once per iteration:
+produce them: `App::refresh_inspection` decides the stage and `ui::timer::timer_view` does
+nothing but match on it. Both the countdown colour and the caption underneath come out of
+that one match:
 
 ```rust
-// src/main.rs
-if app.take_bell() {
-    let mut out = io::stdout();
-    let _ = out.write_all(BEL).and_then(|()| out.flush());
-}
+// src/ui/timer.rs
+let (stage_color, call) = match app.inspection_stage {
+    0 => (C_INSPECT, None),
+    1 => (C_STAGE1, Some("8s")),
+    _ => (C_STAGE2, Some("12s")),
+};
 ```
 
-`take_bell` is a `mem::take`, so a call rings exactly once however many ticks land on top
-of the threshold, and `App` stays free of `io`. BEL moves no cursor, so writing it outside
-`terminal.draw` cannot disturb the frame ratatui is about to diff.
+The caption slot is shared: an earned penalty takes it back off the call, so `+2` or `DNF`
+in red replaces `8s` or `12s` and recolours the digits with it. A call is a thing that has
+not cost you anything yet, and once one has, saying so is the more useful of the two. The
+judge calls are silent; there is no audible signal and nothing about them leaves the frame.
 
 ---
 
@@ -171,7 +187,6 @@ const TICK: Duration = Duration::from_millis(15);
 
 while !app.should_quit {
     app.on_tick();
-    if app.take_bell() { /* write BEL to stdout */ }
     terminal.draw(|frame| ui::draw(frame, app))?;
 
     if event::poll(TICK)? {
@@ -184,11 +199,11 @@ while !app.should_quit {
 }
 ```
 
-Four things happen per iteration, in a fixed order. `on_tick` refreshes the derived
-fields from the monotonic clock. `take_bell` drains any judge call the tick just queued.
-`terminal.draw` rebuilds every line of the frame and
-ratatui diffs the resulting cell buffer against the previous one, so only changed cells
-actually hit the wire. Then `event::poll` blocks for at most 15 ms waiting for input.
+Three things happen per iteration, in a fixed order. `on_tick` refreshes the derived fields
+from the monotonic clock. `terminal.draw` rebuilds every line of the frame and ratatui diffs
+the resulting cell buffer against the previous one, so only changed cells actually hit the
+wire. Then `event::poll` blocks for at most 15 ms waiting for input. Nothing else is written
+to the terminal from inside the loop, which is what lets ratatui own the screen outright.
 
 That 15 ms is the loop's only pacing mechanism. When nothing is happening the loop runs
 at roughly 66 frames per second; when a key arrives it returns early and the frame after
@@ -297,7 +312,7 @@ inspection, not start it.
 
 **Idle to Inspecting.** Only when `save.settings.inspection` is true. The space `Release`
 triggers `start_inspection()`, which stamps `inspection_start`, clears any pending penalty,
-sets `inspection_remaining` to 15 and resets `inspection_stage` and the bell. Inspection
+sets `inspection_remaining` to 15 and resets `inspection_stage` to 0. Inspection
 defaults to off and is toggled with `/inspect`, and because the flag lives on the save file
 rather than on `App`, the choice survives a restart.
 
@@ -389,19 +404,26 @@ the scroll keys and `q` all keep working immediately after a solve.
 **Ctrl-C** is checked before both guards and sets `should_quit` unconditionally, since raw
 mode swallows the signal the shell would normally deliver.
 
-### The times cursor and the solve-detail overlay
+### Selection: the times cursor and the two list overlays
 
-The times list carries a selection rather than a scroll offset. `select_newer` and
-`select_older` move `times_selected` by 1 for the arrows and `j`/`k`, by `TIMES_PAGE` of 10
-for `PageUp` and `PageDown`, and `Home` sets it to 0; both saturate, and `select_older`
-clamps to the oldest solve, so no key can walk the cursor off either end. Where the panel
-scrolls to follow it is `ui/layout.rs`'s `times_window`, which is pure arithmetic and
-tested as such. Anything that changes the visible history, a new scramble included, resets
-the cursor to 0 through `new_scramble`.
+Everything in this section lives in `app/selection.rs`. It is reached from keys the timer
+does not want, and it changes no timer state, which is the whole reason it is not in
+`mod.rs`.
+
+The times list carries a selection rather than a scroll offset. `on_key_idle` hands the
+cursor keys to `on_key_times`, which moves `times_selected` by 1 for the arrows and `j`/`k`,
+by `TIMES_PAGE` of 10 for `PageUp` and `PageDown`, and sets it to 0 for `Home`; both
+`select_newer` and `select_older` saturate, and `select_older` clamps to the oldest solve,
+so no key can walk the cursor off either end. Where the panel scrolls to follow it is
+`ui/layout.rs`'s `list_window`, which is pure arithmetic, tested as such, and shared with
+the sessions picker. Anything that changes the visible history, a new scramble included,
+resets the cursor to 0 through `new_scramble`.
 
 `Enter` in `Idle` calls `open_solve_detail`, which refuses an empty session and otherwise
-stores the clamped index in `solve_detail`. That field being `Some` makes the overlay
-**modal**, checked in `on_key` after the inert-key guard and before command mode:
+stores the clamped index in `solve_detail`. `/sessions` calls `open_sessions_overlay`, which
+stores `active_index()` so the cursor starts on the session you are in. Either field being
+`Some` makes its overlay **modal**, and the two are checked in `on_key` after the inert-key
+guard and before command mode, detail first:
 
 ```rust
 if self.solve_detail.is_some() {
@@ -410,18 +432,42 @@ if self.solve_detail.is_some() {
     }
     return;
 }
+
+if self.sessions_overlay.is_some() {
+    if key.kind == KeyEventKind::Press {
+        self.on_key_sessions(key);
+    }
+    return;
+}
 ```
 
-Only three keys do anything inside it: `r` calls `recall_scramble`, `Esc` and `Enter`
-close. Because the branch sits below the `Timing` check, a solve running underneath an
-overlay still stops on the first key, and because `open_solve_detail` is reachable only
-from `on_key_idle`, `Enter` can never open a popup mid-solve in the first place.
+The precedence runs **detail > sessions > help**. Detail outranks sessions because you can
+only have opened it on top of the list, so closing gives back the thing underneath rather
+than the whole screen at once. Help is not modal and cannot be open beside the sessions
+picker at all: `toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
+`show_help`, so the exclusion is enforced where the state changes rather than in the
+renderer.
+
+Only three keys do anything inside the detail overlay: `r` calls `recall_scramble`, `Esc`
+and `Enter` close. Because both branches sit below the `Timing` check, a solve running
+underneath an overlay still stops on the first key, and because `open_solve_detail` is
+reachable only from `on_key_idle`, `Enter` can never open a popup mid-solve in the first
+place.
 
 `recall_scramble` copies the stored scramble onto `app.scramble` and closes the overlay,
 which is the whole feature: a solve records the scramble it was done on, so re-attempting a
 case needs no new storage, only a copy. It converts the index-from-newest back to a list
 position with `checked_sub` and bails if the arithmetic does not hold, since the solve may
 have been deleted while the overlay was open.
+
+`on_key_sessions` is the picker. The arrows and `j`/`k` move the cursor one row,
+`PageUp`/`PageDown` move it by `SESSIONS_PAGE` of 10, `Home` goes to the top, and all four
+clamp to `sessions.len() - 1`. `Enter` reads the id under the cursor, closes the overlay,
+and calls `switch_to_session` unless that id is already active, in which case the switch is
+skipped so the scramble on screen is not thrown away for nothing. `Esc` closes without
+choosing. `switch_to_session` is the same function `/session <id>` calls, so a switch made
+from the picker re-scrambles, refreshes the derived statistics, announces itself on the
+status line and saves, exactly as the typed command does.
 
 ---
 
@@ -448,7 +494,7 @@ produces `unknown command: <verb>` in the status line.
 | --- | --- |
 | `/2x2` … `/7x7`, `/pyraminx`, `/skewb`, `/megaminx`, `/sq1`, `/clock`, `/oh` | Activate that puzzle's default session (see the navigation rule below) |
 | `/new [name]` | Create and activate a session for the current puzzle |
-| `/sessions` | Open the sessions overlay |
+| `/sessions` | Open the modal sessions picker |
 | `/session <id>` | Activate a session by id, adopting its puzzle |
 | `/rename <name>` | Rename the active session, refused on a default |
 | `/delsession [id]` | Delete a session and its solves, the active one by default |
@@ -725,9 +771,9 @@ times column:
 │                                          │  ...                        │
 │              (dim state caption)         │                             │
 ├─ stats ──────────────────────────────────┤                             │
-│ mo3 12.80   ao5 12.99   ao12 13.45  ...  │                             │
-│ best 9.87   worst 18.20   mean 13.20 ... │                             │
-│ pb single 9.87   mo3 11.02   ao5 11.20 . │                             │
+│ now  mo3 12.80   ao5 12.99   ao12 13.45  │                             │
+│      best 9.87   worst 18.20   mean 13.2 │                             │
+│ pb   single 9.87   mo3 11.02   ao5 11.20 │                             │
 ├──────────────────────────────────────────┴─────────────────────────────┤
 │ space hold+release: start · /: commands · n: new scramble · h: help    │
 └────────────────────────────────────────────────────────────────────────┘
@@ -746,13 +792,20 @@ panic and without a blank screen:
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
 - **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0. Its
-  three text rows are fixed: `mo3 ao5 ao12 ao100 ao1000`, then `best worst mean solves`,
-  then the personal bests behind a dim `pb` prefix. A row never wraps into the one below
-  it, so `fit_count` decides how many entries survive the width and the rest are dropped
-  from the right. Each averages row runs smallest window first, which is also the order in
-  which the numbers start existing as a session grows, so what a narrow terminal keeps is
-  what a short session actually has.
-- **Big digits** need 5 rows (`GLYPH_H`) and enough width for the rendered glyph string.
+  three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (3)
+  plus a space: `now` over `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
+  `best worst mean solves`, then `pb` over the personal bests. The middle row pays for the
+  column it does not use, because the three only read as a block if their values start in
+  the same place, and `stat_budget` is where that toll is taken out of the width before
+  anything is packed. A row never wraps into the one below it, so `fit_count` decides how
+  many entries survive the remaining budget and the rest are dropped from the right. Each
+  averages row runs smallest window first, which is also the order in which the numbers
+  start existing as a session grows, so what a narrow terminal keeps is what a short session
+  actually has. The prefixes are what make the two labelled rows readable against each
+  other: at 80 columns the `pb` row now holds three entries, which is exactly the span the
+  `now` row above it holds.
+- **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
+  `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
   coloured line, so the time is always legible even in a two-row body.
 - **State caption**, the dim line under the digits that names what the timer is doing
@@ -766,13 +819,17 @@ panic and without a blank screen:
   silently clipping a line. Twelve puzzle names no longer fit on one row and the popup does
   not wrap, so `puzzle_help_rows` packs them into as many rows as the description column
   allows and the continuation rows are drawn under an empty key column.
-- **Sessions overlay** is `SESSIONS_W` (44) columns and one row per session, plus a last row
-  and the border. `sessions_popup` returns both the rect and how many sessions to draw,
-  because the renderer holds no scroll state: when the list is taller than the terminal the
-  last row goes to `+N more` instead of a session, and the `esc: close` hint it would
-  otherwise hold is the first thing dropped. Each row is `id name puzzle [count]` in fixed
-  columns, the name clipped to `SESSIONS_NAME_W` (18) with an ellipsis, the twelve `default`
-  names dimmed, and the active session's row reversed across the full popup width.
+- **Sessions overlay** is `SESSIONS_W` (44) columns and one row per session, plus the hint
+  row and the border. `sessions_popup` returns both the rect and how many sessions to draw,
+  because the renderer holds no scroll state: the bottom inner row always belongs to the
+  `enter: switch   esc: close` hint, so a list too tall for the popup gets one row fewer and
+  scrolls under the cursor through the same `list_window` the times panel uses. The title
+  then counts the cursor's position, as in `sessions 14/20`, and says nothing when the whole
+  list fits. Each row is `id name puzzle [count]` in fixed columns, the name clipped to
+  `SESSIONS_NAME_W` (18) with an ellipsis and the twelve `default` names dimmed. The two
+  states a row can be in are deliberately different marks: the active session keeps a `>` in
+  the marker column, the cursor reverses its whole row, and the row that is both reads as a
+  reversed row with a marker on it.
 - **Solve-detail overlay** is `DETAIL_W` (52) columns and grows with the scramble it has to
   show: `detail_popup` runs the scramble through the same `scramble_rows` the header uses,
   adds `DETAIL_FIXED_ROWS` of 6 for the time, the date, the hint and the blanks between
@@ -780,12 +837,13 @@ panic and without a blank screen:
   one-line scramble at the floor. `centered()` clamps it like the help popup, and
   `draw_detail` returns early below 4 by 4.
 
-`draw` picks one popup and only one. The detail popup wins, because it is the one the user
-just asked for and it is the only modal of the three. Help and sessions cannot both be open
-in the first place: `App::toggle_help` clears `show_sessions` and `cmd_list_sessions` clears
+`draw` picks one popup and only one, in the same order `on_key` does: detail, then sessions,
+then help. The detail popup wins because it is the one the user just asked for and the only
+thing that can be opened on top of the list. Help and sessions cannot both be open in the
+first place: `App::toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
 `show_help`, so the exclusion is enforced where the state changes rather than in the
-renderer. Both are non-modal, so the keys behind them keep working and `Esc` closes
-whichever is open before it moves on to clearing the status line.
+renderer. Help is the only non-modal popup of the three, so the keys behind it keep working
+and `Esc` closes it before it moves on to clearing the status line.
 
 ### The adaptive header
 
@@ -812,9 +870,9 @@ Supporting details: `inner_of` computes a bordered block's inner rect with
 `saturating_sub`, so a 1-column rect yields a zero-size inner rect that every drawing
 function checks for and returns from. The block font's `glyph` returns a blank cell for
 any character it does not know, so no input string can misalign the rows or panic. The
-times list slices with `skip`/`take` bounded by `times_window`, and clamps
-`times_selected` to `total - 1`. The same blank-glyph fallback is what lets `hide_time`
-draw the running timer as `...` through the ordinary block-font path.
+times list and the sessions popup both slice with `skip`/`take` bounded by `list_window`,
+and both clamp their cursor to `total - 1`. The same blank-glyph fallback is what lets
+`hide_time` draw the running timer as `...` through the ordinary block-font path.
 
 Colour encodes state and is the fastest thing to read mid-solve: white idle, yellow
 inspecting, red while holding space below the arm threshold, green once `armed_ready()`,

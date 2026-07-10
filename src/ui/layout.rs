@@ -10,8 +10,8 @@ use ratatui::layout::Rect;
 pub(super) const HEADER_MIN_H: u16 = 4;
 /// Tallest scramble panel. Megaminx needs seven text rows; past that the scramble truncates rather than eat the screen.
 pub(super) const HEADER_MAX_H: u16 = 10;
-/// Rows the timer panel needs to keep its block font: [`GLYPH_H`](super::GLYPH_H) glyph rows plus borders.
-pub(super) const TIMER_MIN_H: u16 = super::GLYPH_H as u16 + 2;
+/// Rows the timer panel needs to keep its block font: [`GLYPH_H`](super::timer::GLYPH_H) glyph rows plus borders.
+pub(super) const TIMER_MIN_H: u16 = super::timer::GLYPH_H as u16 + 2;
 
 /// Popup width; the help text is packed to fit it and the popup shrinks to the terminal.
 pub(super) const HELP_W: u16 = 62;
@@ -31,13 +31,15 @@ const DETAIL_FIXED_ROWS: usize = 6;
 pub(super) const SESSIONS_W: u16 = 44;
 /// Columns the name column of the sessions popup gets, padded or cut to exactly this.
 pub(super) const SESSIONS_NAME_W: usize = 18;
-/// Rows the sessions popup spends on something other than a session: two borders and the last line.
+/// Rows the sessions popup spends on something other than a session: two borders and the hint.
 const SESSIONS_FIXED_ROWS: usize = 3;
 
-/// Newer entries kept above the selection in the times list while it moves down.
-const TIMES_LEAD: usize = 2;
+/// Entries kept above the cursor in a scrolling list while it moves down.
+const LIST_LEAD: usize = 2;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
+/// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
+pub(super) const STAT_PREFIX_W: usize = 3;
 
 /// Inner area of a bordered block, guarding against rects too small to have one.
 pub(super) fn inner_of(area: Rect) -> Rect {
@@ -137,44 +139,47 @@ pub(super) fn detail_popup(scramble: &str, area: Rect) -> Rect {
     centered(width, wanted, area)
 }
 
-/// Where the sessions popup sits, and how many of `count` sessions fit in it.
+/// Where the sessions popup sits, and how many of `count` sessions have a row inside it.
 ///
-/// The popup is content-driven and clamped to `area` like the other two. There is no scroll
-/// state to keep, so when the list does not fit the last row goes to the `+N more` line
-/// instead of a session, which is why the returned count is what the renderer draws rather
-/// than what it was asked for.
+/// The popup is content-driven and clamped to `area` like the other two. The bottom inner row
+/// always belongs to the hint, so a list too tall for the popup gets one row fewer and scrolls
+/// under the cursor instead: the returned count is a window size, not the whole list.
 pub(super) fn sessions_popup(count: usize, area: Rect) -> (Rect, usize) {
     let wanted = count
         .saturating_add(SESSIONS_FIXED_ROWS)
         .min(u16::MAX as usize) as u16;
     let popup = centered(SESSIONS_W, wanted, area);
-    let rows = popup.height.saturating_sub(2) as usize;
-    let shown = if count.saturating_add(1) <= rows {
-        count
-    } else {
-        rows.saturating_sub(1)
-    };
-    (popup, shown)
+    let rows = (popup.height.saturating_sub(2) as usize).saturating_sub(1);
+    (popup, rows.min(count))
 }
 
-/// The slice of the times list to draw, as `(entries hidden above, entries visible)`.
+/// The slice of a scrolling list to draw, as `(entries hidden above, entries visible)`.
 ///
-/// Both counts index from the newest solve, the way the list is ordered. The window keeps
-/// [`TIMES_LEAD`] newer entries above the selection where it can and never runs past the
-/// oldest solve. Those two rules alone can scroll the selection out of view in a panel one
-/// or two rows tall, which is what the guard at the end is for.
-pub(super) fn times_window(selected: usize, total: usize, rows: usize) -> (usize, usize) {
+/// Both counts index from the top of the list as drawn, which is the newest solve in the
+/// times panel and the first session in the sessions popup. The window keeps [`LIST_LEAD`]
+/// entries above the cursor where it can and never runs past the end. Those two rules alone
+/// can scroll the cursor out of view in a panel one or two rows tall, which is what the guard
+/// at the end is for.
+pub(super) fn list_window(selected: usize, total: usize, rows: usize) -> (usize, usize) {
     if total == 0 || rows == 0 {
         return (0, 0);
     }
     let selected = selected.min(total - 1);
-    let mut start = selected.saturating_sub(TIMES_LEAD);
+    let mut start = selected.saturating_sub(LIST_LEAD);
     start = start.min(total.saturating_sub(rows));
     // That clamp can push the selection off the bottom of a panel one or two rows tall.
     if selected.saturating_sub(start) >= rows {
         start = selected.saturating_sub(rows - 1);
     }
     (start, rows.min(total - start))
+}
+
+/// Columns a stats row has left for its entries once the prefix column and its space are taken.
+///
+/// Every row pays for the column, labelled or not, because the three rows only read as a block
+/// if their values start in the same place.
+pub(super) fn stat_budget(width: u16) -> u16 {
+    width.saturating_sub(STAT_PREFIX_W as u16).saturating_sub(1)
 }
 
 /// How many leading entries of `widths` fit in `width` columns with [`STAT_SEP`] between them.
@@ -389,39 +394,39 @@ mod tests {
         assert_eq!(rows[1], "pyraminx skewb megaminx sq1 clock oh");
     }
 
-    // ---- times window
+    // ---- list window
 
     #[test]
-    fn times_window_shows_the_newest_solves_at_the_top_of_the_list() {
-        assert_eq!(times_window(0, 87, 10), (0, 10));
-        assert_eq!(times_window(1, 87, 10), (0, 10));
-        assert_eq!(times_window(2, 87, 10), (0, 10), "the lead is used up first");
+    fn list_window_shows_the_top_of_the_list_first() {
+        assert_eq!(list_window(0, 87, 10), (0, 10));
+        assert_eq!(list_window(1, 87, 10), (0, 10));
+        assert_eq!(list_window(2, 87, 10), (0, 10), "the lead is used up first");
     }
 
     #[test]
-    fn times_window_keeps_two_newer_entries_above_a_selection_in_the_middle() {
-        assert_eq!(times_window(3, 87, 10), (1, 10));
-        assert_eq!(times_window(40, 87, 10), (38, 10));
+    fn list_window_keeps_two_entries_above_a_cursor_in_the_middle() {
+        assert_eq!(list_window(3, 87, 10), (1, 10));
+        assert_eq!(list_window(40, 87, 10), (38, 10));
     }
 
     #[test]
-    fn times_window_stops_at_the_oldest_solve() {
+    fn list_window_stops_at_the_end_of_the_list() {
         // The last ten of 87 start at 77, and the window does not scroll past them.
-        assert_eq!(times_window(80, 87, 10), (77, 10));
-        assert_eq!(times_window(86, 87, 10), (77, 10));
+        assert_eq!(list_window(80, 87, 10), (77, 10));
+        assert_eq!(list_window(86, 87, 10), (77, 10));
     }
 
     #[test]
-    fn times_window_shows_everything_when_the_list_is_shorter_than_the_panel() {
-        assert_eq!(times_window(0, 4, 10), (0, 4));
-        assert_eq!(times_window(3, 4, 10), (0, 4));
+    fn list_window_shows_everything_when_the_list_is_shorter_than_the_panel() {
+        assert_eq!(list_window(0, 4, 10), (0, 4));
+        assert_eq!(list_window(3, 4, 10), (0, 4));
     }
 
     #[test]
-    fn times_window_keeps_the_selection_visible_in_a_one_or_two_row_panel() {
+    fn list_window_keeps_the_cursor_visible_in_a_one_or_two_row_panel() {
         for rows in [1usize, 2] {
             for selected in 0..20usize {
-                let (start, len) = times_window(selected, 20, rows);
+                let (start, len) = list_window(selected, 20, rows);
                 assert!(
                     (start..start + len).contains(&selected),
                     "selection {} fell outside {}..{} at {} rows",
@@ -432,24 +437,44 @@ mod tests {
                 );
             }
         }
-        assert_eq!(times_window(7, 20, 1), (7, 1));
-        assert_eq!(times_window(7, 20, 2), (6, 2));
+        assert_eq!(list_window(7, 20, 1), (7, 1));
+        assert_eq!(list_window(7, 20, 2), (6, 2));
     }
 
     #[test]
-    fn times_window_of_an_empty_or_invisible_list_is_empty() {
-        assert_eq!(times_window(0, 0, 10), (0, 0));
-        assert_eq!(times_window(usize::MAX, 0, 10), (0, 0));
-        assert_eq!(times_window(0, 20, 0), (0, 0));
+    fn list_window_of_an_empty_or_invisible_list_is_empty() {
+        assert_eq!(list_window(0, 0, 10), (0, 0));
+        assert_eq!(list_window(usize::MAX, 0, 10), (0, 0));
+        assert_eq!(list_window(0, 20, 0), (0, 0));
     }
 
     #[test]
-    fn a_selection_past_the_end_is_clamped_to_the_oldest_solve() {
-        assert_eq!(times_window(usize::MAX, 87, 10), (77, 10));
-        assert_eq!(times_window(500, 4, 10), (0, 4));
+    fn a_cursor_past_the_end_is_clamped_to_the_last_entry() {
+        assert_eq!(list_window(usize::MAX, 87, 10), (77, 10));
+        assert_eq!(list_window(500, 4, 10), (0, 4));
+    }
+
+    /// The sessions popup windows the same way, with the rows [`sessions_popup`] leaves it.
+    #[test]
+    fn list_window_scrolls_a_sessions_list_deep_under_its_cursor() {
+        let (_, rows) = sessions_popup(15, rect(80, 10));
+        assert_eq!(rows, 7, "seven sessions, then the hint");
+        assert_eq!(list_window(0, 15, rows), (0, 7), "it opens on the first");
+        assert_eq!(list_window(14, 15, rows), (8, 7), "and follows the cursor down");
+        assert_eq!(list_window(9, 15, rows), (7, 7));
     }
 
     // ---- stats packing
+
+    #[test]
+    fn stat_budget_charges_every_row_for_the_prefix_column() {
+        // Three columns of prefix and the space after it, whether the row labels itself or not.
+        assert_eq!(stat_budget(52), 48);
+        assert_eq!(stat_budget(5), 1);
+        for width in 0..=4u16 {
+            assert_eq!(stat_budget(width), 0, "a row this narrow has nothing left");
+        }
+    }
 
     #[test]
     fn fit_count_keeps_what_the_row_holds_and_drops_the_rest() {
@@ -505,38 +530,46 @@ mod tests {
     #[test]
     fn the_sessions_popup_grows_to_hold_the_whole_list() {
         // Twelve defaults and three of your own: fifteen rows, a hint row and two borders.
-        let (popup, shown) = sessions_popup(15, rect(80, 30));
+        let (popup, rows) = sessions_popup(15, rect(80, 30));
         assert_eq!((popup.width, popup.height), (SESSIONS_W, 18));
-        assert_eq!(shown, 15, "everything fits, so everything is drawn");
+        assert_eq!(rows, 15, "everything fits, so everything is drawn");
         assert_eq!((popup.x, popup.y), (18, 6), "and it is centered");
     }
 
     #[test]
-    fn the_sessions_popup_gives_its_last_row_to_the_overflow_line() {
-        // Eight rows leaves six inside the border: five sessions and a `+10 more`.
-        let (popup, shown) = sessions_popup(15, rect(80, 8));
+    fn the_sessions_popup_keeps_its_last_row_for_the_hint() {
+        // Eight rows leaves six inside the border: five sessions and the hint.
+        let (popup, rows) = sessions_popup(15, rect(80, 8));
         assert_eq!(popup.height, 8);
-        assert_eq!(shown, 5);
+        assert_eq!(rows, 5);
 
-        // One row short of the whole list still costs a session, never a silent clip.
-        let (popup, shown) = sessions_popup(15, rect(80, 17));
+        // One row short of the whole list costs a session, which the window then scrolls.
+        let (popup, rows) = sessions_popup(15, rect(80, 17));
         assert_eq!(popup.height, 17);
-        assert_eq!(shown, 14);
+        assert_eq!(rows, 14);
     }
 
     #[test]
     fn the_sessions_popup_is_clamped_to_the_terminal() {
         for (w, h) in [(80u16, 30u16), (44, 12), (30, 8), (10, 4), (1, 1), (0, 0)] {
-            let (popup, shown) = sessions_popup(15, rect(w, h));
+            let (popup, rows) = sessions_popup(15, rect(w, h));
             assert!(popup.width <= w && popup.height <= h, "{:?} escapes {}x{}", popup, w, h);
-            assert!(shown <= 15, "the popup never claims to draw more than it has");
+            assert!(rows <= 15, "the popup never claims to draw more than it has");
             assert!(
-                shown + 2 <= popup.height.max(2) as usize,
-                "{} rows do not fit a popup {} tall",
-                shown,
+                rows + 3 <= popup.height.max(3) as usize,
+                "{} rows and a hint do not fit a popup {} tall",
+                rows,
                 popup.height
             );
         }
+    }
+
+    #[test]
+    fn the_sessions_popup_of_a_short_list_has_no_hidden_rows() {
+        let (popup, rows) = sessions_popup(2, rect(80, 30));
+        assert_eq!(popup.height, 5, "two sessions, the hint and two borders");
+        assert_eq!(rows, 2);
+        assert_eq!(sessions_popup(0, rect(80, 30)).1, 0, "an empty list draws no rows");
     }
 
     // ---- geometry
