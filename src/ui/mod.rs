@@ -215,10 +215,10 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     let pb = &app.pbs;
     let width = area.width.saturating_sub(2);
 
-    // The first row is what the session is doing now, which only reads against the `pb` row below
-    // once it says so.
+    // The first and last rows carry the same five windows, so a rolling average sits directly
+    // above the best that window has ever been. The session's own spread goes between them.
     let averages = stat_row(
-        "now",
+        "current",
         vec![
             ("mo3", st.mo3.display(), C_TIMING),
             ("ao5", st.ao5.display(), C_TIMING),
@@ -231,8 +231,9 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     let session = stat_row(
         "",
         vec![
-            ("best", opt_time(st.best), C_BEST),
-            ("worst", opt_time(st.worst), C_WORST),
+            // Two-word labels, because `best` and `worst` alone would read as the row prefixes.
+            ("best single", opt_time(st.best), C_BEST),
+            ("worst single", opt_time(st.worst), C_WORST),
             ("mean", opt_time(st.mean), C_IDLE),
             (
                 "solves",
@@ -243,9 +244,8 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         width,
     );
     let bests = stat_row(
-        "pb",
+        "best",
         vec![
-            ("single", opt_time(pb.single), C_ACCENT),
             ("mo3", opt_time(pb.mo3), C_ACCENT),
             ("ao5", opt_time(pb.ao5), C_ACCENT),
             ("ao12", opt_time(pb.ao12), C_ACCENT),
@@ -486,6 +486,23 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
+    /// The three stats rows as drawn, stripped of the panel border and of trailing padding.
+    fn stats_lines(app: &App, w: u16, h: u16) -> Vec<String> {
+        let buffer = render_buffer(app, w, h);
+        let rows = rows_of(&buffer);
+        let top = rows
+            .iter()
+            .position(|row| row.contains("current "))
+            .expect("the stats strip is drawn");
+        rows[top..top + 3]
+            .iter()
+            .map(|row| {
+                let inner: String = row.chars().skip(1).take_while(|c| *c != '│').collect();
+                inner.trim_end().to_string()
+            })
+            .collect()
+    }
+
     /// The column `label` starts at, counted in characters so the box drawing does not skew it.
     fn label_col(row: &str, label: &str) -> usize {
         let byte = row
@@ -580,25 +597,43 @@ mod tests {
                 ("ao12", "11.00".to_string(), C_TIMING),
             ]
         };
-        // Four columns of prefix, "ao5 10.00" in nine, three between, "ao12 11.00" in ten.
+        // Eight columns of prefix, "ao5 10.00" in nine, three between, "ao12 11.00" in ten.
         assert_eq!(
-            line_text(&stat_row("now", entries(), 26)),
-            "now ao5 10.00   ao12 11.00"
+            line_text(&stat_row("current", entries(), 30)),
+            "current ao5 10.00   ao12 11.00"
         );
         assert_eq!(
-            line_text(&stat_row("now", entries(), 25)),
-            "now ao5 10.00",
+            line_text(&stat_row("current", entries(), 29)),
+            "current ao5 10.00",
             "one column short and the second entry goes"
         );
         assert_eq!(
-            line_text(&stat_row("", entries(), 26)),
-            "    ao5 10.00   ao12 11.00",
+            line_text(&stat_row("", entries(), 30)),
+            "        ao5 10.00   ao12 11.00",
             "an unlabelled row still holds the column"
         );
         assert_eq!(
-            line_text(&stat_row("pb", entries(), 0)),
-            "pb  ao5 10.00",
+            line_text(&stat_row("best", entries(), 0)),
+            "best    ao5 10.00",
             "a row with no room left still shows one entry"
+        );
+
+        // A two-word label is measured whole, space included, or the row would overpack.
+        let session = || {
+            vec![
+                ("best single", "10.00".to_string(), C_BEST),
+                ("worst single", "11.00".to_string(), C_WORST),
+            ]
+        };
+        assert_eq!(
+            line_text(&stat_row("", session(), 46)),
+            "        best single 10.00   worst single 11.00",
+            "seventeen columns, three between, and eighteen more"
+        );
+        assert_eq!(
+            line_text(&stat_row("", session(), 45)),
+            "        best single 10.00",
+            "one column short and the second two-word entry goes"
         );
     }
 
@@ -614,17 +649,67 @@ mod tests {
                 .clone()
         };
 
-        let now = find("now ");
-        let session = find("best");
-        let pb = find("pb  ");
-        assert!(now.contains("mo3"), "the rolling averages are the labelled row");
-        assert!(pb.contains("single"), "the personal bests keep their own label");
+        let current = find("current ");
+        let session = find("best single");
+        let bests = find("best    ");
+        assert!(
+            current.contains("mo3"),
+            "the rolling averages are the labelled row"
+        );
+        assert!(
+            !bests.contains("single"),
+            "the personal bests row is averages only: {:?}",
+            bests
+        );
+        assert!(
+            session.contains("worst single"),
+            "the session spread names both of its singles in full: {:?}",
+            session
+        );
+
+        let first = label_col(&current, "mo3");
         assert_eq!(
-            label_col(&now, "mo3"),
-            label_col(&session, "best"),
+            first,
+            label_col(&current, "current") + STAT_PREFIX_W + 1,
+            "the widest prefix and one space, and no ragged offset after it"
+        );
+        assert_eq!(
+            first,
+            label_col(&session, "best single"),
             "the unlabelled row lines up with the labelled ones"
         );
-        assert_eq!(label_col(&now, "mo3"), label_col(&pb, "single"));
+        assert_eq!(
+            first,
+            label_col(&bests, "mo3"),
+            "and the PB of a window sits under the rolling one"
+        );
+    }
+
+    #[test]
+    fn the_stats_strip_drops_entries_from_the_right_as_the_terminal_narrows() {
+        let app = app_with(Puzzle::Cube3, 30);
+
+        assert_eq!(
+            stats_lines(&app, 80, 30),
+            [
+                "current mo3 22.00   ao5 22.00   ao12 DNF   ao100 -",
+                "        best single 8.00   worst single 22.50",
+                "best    mo3 8.50   ao5 9.16   ao12 11.45   ao100 -",
+            ],
+            "at 80 columns each row keeps what its 44 columns of budget hold"
+        );
+
+        assert_eq!(
+            stats_lines(&app, 44, 30),
+            [
+                "current mo3 22.00",
+                // Sixteen columns of `best single 8.00` against fourteen of budget: the row keeps
+                // the entry anyway, because one clipped number reads better than a blank row.
+                "        best single 8.",
+                "best    mo3 8.50",
+            ],
+            "at 44 columns every row is down to the one entry it may never drop"
+        );
     }
 
     #[test]

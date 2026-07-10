@@ -39,7 +39,10 @@ const LIST_LEAD: usize = 2;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
 /// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
-pub(super) const STAT_PREFIX_W: usize = 3;
+///
+/// Seven is the width of `current`, the longest of the three prefixes; the space after the
+/// column is added on top, so every row's first entry starts at the same column.
+pub(super) const STAT_PREFIX_W: usize = 7;
 
 /// Inner area of a bordered block, guarding against rects too small to have one.
 pub(super) fn inner_of(area: Rect) -> Rect {
@@ -468,10 +471,11 @@ mod tests {
 
     #[test]
     fn stat_budget_charges_every_row_for_the_prefix_column() {
-        // Three columns of prefix and the space after it, whether the row labels itself or not.
-        assert_eq!(stat_budget(52), 48);
-        assert_eq!(stat_budget(5), 1);
-        for width in 0..=4u16 {
+        // Seven columns of prefix and the space after it, whether the row labels itself or not.
+        assert_eq!(STAT_PREFIX_W, "current".len(), "the column fits the widest prefix");
+        assert_eq!(stat_budget(52), 44);
+        assert_eq!(stat_budget(9), 1);
+        for width in 0..=8u16 {
             assert_eq!(stat_budget(width), 0, "a row this narrow has nothing left");
         }
     }

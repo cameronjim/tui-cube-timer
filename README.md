@@ -262,17 +262,19 @@ penalised time. Times are truncated to centiseconds rather than rounded, WCA
 style, so 12.349 shows as `12.34`.
 
 The stats strip reads in three rows, and the first and last say which is which:
-`now` labels your rolling `mo3 ao5 ao12 ao100 ao1000`, the middle row is
-`best worst mean solves` for the session you are in, and `pb` labels your
-personal bests underneath. The middle row is unlabelled but still indented to the
-same column, so the three line up and a rolling average sits directly above the
-best you have ever done of it. The `best`, `worst` and `mean` figures cover the current session only and
-ignore DNFs. The personal bests are wider: PB single, mo3, ao5, ao12, ao100 and
-ao1000 are the best you have ever done across every session of the puzzle you
-are currently on, and the rolling windows behind them are searched within each
+`current` labels your rolling `mo3 ao5 ao12 ao100 ao1000`, and `best` labels the
+same five windows at the best you have ever done them. The middle row, between
+the two, is `best single worst single mean solves` for the session you are in. It
+carries no label of its own but is still indented to the same column, so all
+three rows start their numbers in the same place and a rolling average sits
+directly above its personal best. The middle row's figures cover the current
+session only and ignore DNFs, and its two singles are spelled out in full,
+`best single` and `worst single`, so neither reads as a row label. The personal
+bests are the best you have ever done across every session of the puzzle you are
+currently on, and the rolling windows behind them are searched within each
 session rather than across the seam between two of them. On a narrow terminal a
-row drops entries from the right rather than wrapping, so the numbers you look
-at most stay put.
+row drops entries from the right rather than wrapping, so the numbers you look at
+most stay put.
 
 ## Scrambles
 
