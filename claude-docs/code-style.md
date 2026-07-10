@@ -10,15 +10,19 @@ Each of the seven modules owns exactly one concern, and the dependency arrows on
 one way:
 
 ```
-main.rs  ->  app.rs  ->  scramble/, stats.rs, storage.rs, types.rs
-main.rs  ->  ui/     ->  app.rs (read-only), types.rs
+main.rs  ->  app/   ->  scramble/, stats.rs, storage.rs, types.rs
+main.rs  ->  ui/    ->  app/ (read-only), types.rs
 ```
 
-`scramble/` and `ui/` are directories, not files, because one responsibility outgrew one
-file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per puzzle family;
-`ui/mod.rs` draws and `ui/layout.rs` holds the pure geometry it draws into. A directory is
-still one module for the purposes of this document: the boundary rules below apply to
-`ui/` as a whole, not to each file inside it.
+`app/`, `scramble/` and `ui/` are directories, not files, because one responsibility
+outgrew one file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per puzzle
+family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
+block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
+geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
+command mode, `app/selection.rs` owns the times cursor and the two list overlays, and
+`app/repair.rs` repairs a save file. A directory is still one module for the purposes of
+this document: the boundary rules below apply to `ui/` as a whole, not to each file inside
+it, and the same goes for `app/`.
 
 `types.rs` sits at the bottom and depends on nothing but `serde`. Its module doc says so
 out loud: keep it dependency-light. Anything that grows a dependency there ripples through
@@ -30,7 +34,7 @@ every other module.
 plain field by `App::on_tick` before the frame is drawn:
 
 ```rust
-// app.rs, the producer
+// app/mod.rs, the producer
 TimerState::Timing { started } => {
     self.display_millis = started.elapsed().as_millis() as u64;
 }
@@ -70,7 +74,7 @@ that is not `O(what is on screen)` belongs in a cached field.
 
 ### One owner per decision
 
-`storage.rs` decides where data lives, `app.rs` decides when to write it, and nobody else
+`storage.rs` decides where data lives, `app` decides when to write it, and nobody else
 touches either question. `App::save_now` is the single funnel:
 
 ```rust
@@ -100,22 +104,34 @@ everybody else.
 The split line is roughly 500 lines of non-test code, and it is a responsibility split, not
 a line-count split. Never split by "first half, second half".
 
-`scramble/` and `ui/` show what a good split looks like. `scramble/` divides by puzzle
+The three directories show what a good split looks like. `scramble/` divides by puzzle
 family, because the generators share nothing but the `Rng` they are handed. `ui/` divides
-by kind of work: `mod.rs` draws, `layout.rs` computes geometry and touches neither `Frame`
-nor `App`, which turned the degradation rules from something checked by eye into ordinary
-unit tests. Both splits made the code more testable, which is the sign you cut in the right
-place.
+by kind of work: `mod.rs` draws the frame, `timer.rs` draws the one panel with a rendering
+model of its own, `overlay.rs` draws the popups over both, and `layout.rs` computes geometry
+and touches neither `Frame` nor `App`, which turned the degradation rules from something
+checked by eye into ordinary unit tests. `app/` divides by question asked: `repair.rs`
+answers "is this save file internally consistent" as free functions over `&mut SaveFile`,
+`commands.rs` owns command mode behind the single `on_command_key` entry point,
+`selection.rs` owns which solve or session you are pointing at, which the timer never asks,
+and `mod.rs` keeps the state machine. Every one of those splits made the code more testable,
+which is the sign you cut in the right place.
 
-`app.rs` is at 765 non-test lines and is the file to split next. Two seams are marked:
+Two habits make a split of this kind cheap. First, the public surface does not move: `App`,
+`TimerState` and `InputMode` are still `crate::app::*`, so `main.rs` and `ui` never learned
+that `app` became a directory. Second, tests move with their subject, and the scaffolding
+they share moves to a `#[cfg(test)] mod testkit` beside them rather than being duplicated.
 
-- **Save-file structural repair.** `sanitize`, `free_next_id`, `take_id`, `dedupe_ids` and
-  `evict_misfiled_defaults` are pure functions of a `SaveFile` that answer one question,
-  "is this file internally consistent", and none of them touch the timer. They are the
-  cleaner cut of the two and the one to take first.
-- **Command mode.** The `// ----- command mode` banner already marks it: the `/command`
-  parser and its `cmd_*` handlers move out together, taking their tests with them, and
-  `App` keeps the state machine.
+A third habit is worth naming from the two splits that produced `app/selection.rs` and
+`ui/timer.rs`: the parent keeps one entry point per cluster and the child keeps everything
+behind it. `on_key_idle` hands its cursor keys to `selection::on_key_times` rather than
+importing `TIMES_PAGE` back out, and `draw_body` calls `timer::draw_timer` rather than
+knowing what `GLYPH_H` is. A constant that has to travel back up to the parent is a sign the
+cut was made one function too deep.
+
+No file in `src/` is over the line now. The largest are `app/mod.rs` at 475 non-test lines
+and `ui/mod.rs` at 367; the next candidates below them are `storage.rs` at 345 and
+`app/commands.rs` at 303, and none of the four has a seam worth cutting yet. Treat growth
+past roughly 500 in any of them as the prompt to look again.
 
 ## Comments
 
