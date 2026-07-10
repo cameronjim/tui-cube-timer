@@ -47,15 +47,15 @@ testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `r
 bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for both renderers. Never
 duplicate a helper across sibling files.
 
-Current state, 299 tests, all green:
+Current state, 308 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `app/mod.rs` | 53 | State machine, keys, inspection and judge calls, the times cursor, the detail overlay, the derived cache |
+| `app/mod.rs` | 55 | State machine, keys, inspection and judge calls, the times cursor, the three popups, the derived cache |
 | `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
-| `app/commands.rs` | 32 | Every `/command`, its arguments, its refusals and its persistence |
+| `app/commands.rs` | 33 | Every `/command`, its arguments, its refusals and its persistence |
+| `ui/layout.rs` | 32 | Panel heights, word wrap, the header cap, popup packing |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
-| `ui/layout.rs` | 29 | Panel heights, word wrap, the header cap, popup packing |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
@@ -64,8 +64,8 @@ Current state, 299 tests, all green:
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
 | `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
+| `ui/overlay.rs` | 8 | All three popups at four sizes, clamping, which one wins |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
-| `ui/overlay.rs` | 5 | Both popups at four sizes, clamping, which one wins |
 | `scramble/mod.rs` | 5 | Every puzzle dispatches, is non-empty and is seed-stable |
 
 The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
@@ -254,7 +254,7 @@ squinting.
 **Drawing is smoke-tested through `TestBackend`.** `render(app, w, h)` draws one frame into
 a ratatui `TestBackend` and returns every cell's symbol as a string. The tests sweep four
 sizes, `(80,30)`, `(44,12)`, `(30,8)` and `(10,4)`, over every puzzle, empty and populated,
-plus the help overlay, command mode, a status message, a 60-character session name, a solve
+plus the help and sessions overlays, command mode, a status message, a 60-character session name, a solve
 over an hour, and a times scroll past the end of the list.
 
 Be clear about what that buys. For most of these, **not panicking is the assertion**. That

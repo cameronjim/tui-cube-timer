@@ -27,6 +27,13 @@ const DETAIL_MAX_H: u16 = 20;
 /// Rows the detail popup spends on everything but the scramble: the time, the date, the hint and the blanks between them.
 const DETAIL_FIXED_ROWS: usize = 6;
 
+/// Width of the sessions popup: a marker, an id, a name column, a puzzle and a solve count.
+pub(super) const SESSIONS_W: u16 = 44;
+/// Columns the name column of the sessions popup gets, padded or cut to exactly this.
+pub(super) const SESSIONS_NAME_W: usize = 18;
+/// Rows the sessions popup spends on something other than a session: two borders and the last line.
+const SESSIONS_FIXED_ROWS: usize = 3;
+
 /// Newer entries kept above the selection in the times list while it moves down.
 const TIMES_LEAD: usize = 2;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
@@ -128,6 +135,26 @@ pub(super) fn detail_popup(scramble: &str, area: Rect) -> Rect {
         .saturating_add(2)
         .min(DETAIL_MAX_H as usize) as u16;
     centered(width, wanted, area)
+}
+
+/// Where the sessions popup sits, and how many of `count` sessions fit in it.
+///
+/// The popup is content-driven and clamped to `area` like the other two. There is no scroll
+/// state to keep, so when the list does not fit the last row goes to the `+N more` line
+/// instead of a session, which is why the returned count is what the renderer draws rather
+/// than what it was asked for.
+pub(super) fn sessions_popup(count: usize, area: Rect) -> (Rect, usize) {
+    let wanted = count
+        .saturating_add(SESSIONS_FIXED_ROWS)
+        .min(u16::MAX as usize) as u16;
+    let popup = centered(SESSIONS_W, wanted, area);
+    let rows = popup.height.saturating_sub(2) as usize;
+    let shown = if count.saturating_add(1) <= rows {
+        count
+    } else {
+        rows.saturating_sub(1)
+    };
+    (popup, shown)
 }
 
 /// The slice of the times list to draw, as `(entries hidden above, entries visible)`.
@@ -470,6 +497,45 @@ mod tests {
         for (w, h) in [(80u16, 30u16), (44, 12), (30, 8), (10, 4), (1, 1), (0, 0)] {
             let popup = detail_popup(&mega(), rect(w, h));
             assert!(popup.width <= w && popup.height <= h, "{:?} escapes {}x{}", popup, w, h);
+        }
+    }
+
+    // ---- sessions popup
+
+    #[test]
+    fn the_sessions_popup_grows_to_hold_the_whole_list() {
+        // Twelve defaults and three of your own: fifteen rows, a hint row and two borders.
+        let (popup, shown) = sessions_popup(15, rect(80, 30));
+        assert_eq!((popup.width, popup.height), (SESSIONS_W, 18));
+        assert_eq!(shown, 15, "everything fits, so everything is drawn");
+        assert_eq!((popup.x, popup.y), (18, 6), "and it is centered");
+    }
+
+    #[test]
+    fn the_sessions_popup_gives_its_last_row_to_the_overflow_line() {
+        // Eight rows leaves six inside the border: five sessions and a `+10 more`.
+        let (popup, shown) = sessions_popup(15, rect(80, 8));
+        assert_eq!(popup.height, 8);
+        assert_eq!(shown, 5);
+
+        // One row short of the whole list still costs a session, never a silent clip.
+        let (popup, shown) = sessions_popup(15, rect(80, 17));
+        assert_eq!(popup.height, 17);
+        assert_eq!(shown, 14);
+    }
+
+    #[test]
+    fn the_sessions_popup_is_clamped_to_the_terminal() {
+        for (w, h) in [(80u16, 30u16), (44, 12), (30, 8), (10, 4), (1, 1), (0, 0)] {
+            let (popup, shown) = sessions_popup(15, rect(w, h));
+            assert!(popup.width <= w && popup.height <= h, "{:?} escapes {}x{}", popup, w, h);
+            assert!(shown <= 15, "the popup never claims to draw more than it has");
+            assert!(
+                shown + 2 <= popup.height.max(2) as usize,
+                "{} rows do not fit a popup {} tall",
+                shown,
+                popup.height
+            );
         }
     }
 
