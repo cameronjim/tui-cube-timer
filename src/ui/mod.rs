@@ -12,14 +12,14 @@ mod timer;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, InputMode};
 use crate::types::{format_millis, format_solve, Penalty};
 use layout::{
-    fit_count, footer_height, header_height, inner_of, list_window, stat_budget, STAT_PREFIX_W,
-    STAT_SEP,
+    fit_count, footer_height, header_height, inner_of, list_window, stat_budget, stats_height,
+    STAT_PREFIX_W, STAT_ROWS, STAT_SEP,
 };
 use timer::draw_timer;
 
@@ -34,6 +34,8 @@ const C_LABEL: Color = Color::DarkGray;
 const C_ACCENT: Color = Color::Magenta;
 const C_BEST: Color = Color::Green;
 const C_WORST: Color = Color::Red;
+/// A personal best just set: the banner over the digits and the digits under it.
+const C_PB: Color = Color::LightGreen;
 /// Inspection past eight seconds.
 const C_STAGE1: Color = Color::LightMagenta;
 /// Inspection past twelve seconds.
@@ -154,8 +156,8 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(side_w)])
         .split(area);
 
-    // Stats strip is 3 text rows + borders; drop it when the body is short.
-    let stats_h: u16 = if cols[0].height >= 12 { 5 } else { 0 };
+    // Stats strip is 3 text rows + borders, plus the sparkline when the column can spare it.
+    let stats_h = stats_height(app.trend.len(), cols[0].height);
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(stats_h)])
@@ -207,13 +209,58 @@ fn stat_row(
     Line::from(spans)
 }
 
+/// Prefix of the sparkline row, in the same column the three stats rows label themselves in.
+const TREND_LABEL: &str = "trend";
+
+/// The last solves of the session as bars: bars are times, so a dip is a fast solve.
+///
+/// The bars start where the numbers above them do, and the newest solves are the ones worth
+/// seeing, so a panel narrower than the trend drops the oldest rather than the most recent.
+fn draw_trend(frame: &mut Frame, app: &App, area: Rect) {
+    let label_w = STAT_PREFIX_W as u16 + 1;
+    if area.height == 0 || area.width <= label_w || app.trend.is_empty() {
+        return;
+    }
+
+    let label = Paragraph::new(Line::styled(
+        format!("{:<width$} ", TREND_LABEL, width = STAT_PREFIX_W),
+        dim(),
+    ));
+    frame.render_widget(
+        label,
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: label_w,
+            height: 1,
+        },
+    );
+
+    let bars = Rect {
+        x: area.x.saturating_add(label_w),
+        y: area.y,
+        width: area.width.saturating_sub(label_w),
+        height: area.height,
+    };
+    let start = app.trend.len().saturating_sub(bars.width as usize);
+    let spark = Sparkline::default()
+        .data(&app.trend[start..])
+        .style(Style::default().fg(C_TIMING));
+    frame.render_widget(spark, bars);
+}
+
 fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let inner = inner_of(area);
+    frame.render_widget(panel("stats"), area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     let st = &app.stats;
     let pb = &app.pbs;
-    let width = area.width.saturating_sub(2);
+    let width = inner.width;
 
     // The first and last rows carry the same five windows, so a rolling average sits directly
     // above the best that window has ever been. The session's own spread goes between them.
@@ -255,8 +302,24 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         width,
     );
 
-    let p = Paragraph::new(Text::from(vec![averages, session, bests])).block(panel("stats"));
-    frame.render_widget(p, area);
+    // The three rows keep the top of the block, so the sparkline grows downwards off them.
+    let rows = Rect {
+        height: inner.height.min(STAT_ROWS),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(Text::from(vec![averages, session, bests])), rows);
+
+    if inner.height > STAT_ROWS {
+        draw_trend(
+            frame,
+            app,
+            Rect {
+                y: inner.y.saturating_add(STAT_ROWS),
+                height: inner.height - STAT_ROWS,
+                ..inner
+            },
+        );
+    }
 }
 
 // ---------------------------- times list (newest first, with a selection)
@@ -710,6 +773,118 @@ mod tests {
             ],
             "at 44 columns every row is down to the one entry it may never drop"
         );
+    }
+
+    /// Cells of a row drawn as sparkline bars, the only mark the trend leaves in the strip.
+    fn bars_in(row: &str) -> usize {
+        row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count()
+    }
+
+    /// Oldest first, slowest first, so the leading bar is full in both of the sparkline's rows.
+    fn seeded_trend() -> Vec<u64> {
+        vec![20_000, 12_000, 13_500, 11_000, 14_000, 12_500]
+    }
+
+    #[test]
+    fn the_trend_sparkline_sits_under_the_stats_rows_with_its_bars_in_the_values_column() {
+        let mut app = app_with(Puzzle::Cube3, 30);
+        app.trend = seeded_trend();
+        let buffer = render_buffer(&app, 80, 34);
+        let rows = rows_of(&buffer);
+        let find = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no row of the frame holds {:?}", needle))
+        };
+
+        let current = find("current ");
+        let trend = find("trend ");
+        assert_eq!(trend, current + 3, "the bars go under the three stats rows");
+        assert_eq!(
+            label_col(&rows[trend], "trend"),
+            label_col(&rows[current], "current"),
+            "the label shares the prefix column with the rows above it"
+        );
+
+        let values = label_col(&rows[current], "mo3");
+        for y in [trend, trend + 1] {
+            assert_eq!(
+                rows[y].chars().nth(values),
+                Some('█'),
+                "the slowest solve is a full bar starting where the numbers do: {:?}",
+                rows[y]
+            );
+            assert!(
+                bars_in(&rows[y]) > 1,
+                "both rows of the sparkline are drawn: {:?}",
+                rows[y]
+            );
+        }
+        assert!(
+            rows[trend + 2].contains('╰'),
+            "and the stats block closes directly under the bars"
+        );
+        render_all(&app);
+    }
+
+    #[test]
+    fn the_sparkline_is_the_first_thing_a_short_terminal_drops() {
+        let mut app = app_with(Puzzle::Cube3, 30);
+        app.trend = seeded_trend();
+        assert!(
+            render(&app, 80, 21).contains("trend"),
+            "twenty-one rows still leaves the timer its glyph rows"
+        );
+
+        let short = render(&app, 80, 20);
+        assert!(!short.contains("trend"), "one row fewer and the bars go first");
+        assert!(short.contains("current "), "the stats rows themselves stay");
+        assert!(short.contains('█'), "and so does the block font under them");
+    }
+
+    #[test]
+    fn an_empty_trend_draws_no_label_and_no_bars() {
+        let mut app = app_with(Puzzle::Cube3, 0);
+        app.trend.clear();
+        let buffer = render_buffer(&app, 80, 34);
+        let rows = rows_of(&buffer);
+        let current = rows
+            .iter()
+            .position(|row| row.contains("current "))
+            .expect("the stats strip is drawn");
+
+        assert!(
+            !rows.iter().any(|row| row.contains("trend")),
+            "a session with nothing to plot says nothing about it"
+        );
+        assert!(
+            rows[current + 3].contains('╰'),
+            "the block is the five rows it always was"
+        );
+        render_all(&app);
+    }
+
+    #[test]
+    fn a_trend_wider_than_the_panel_keeps_its_newest_solves() {
+        let mut app = app_with(Puzzle::Cube3, 60);
+        // Fifty bars against a strip that holds far fewer, and the last one is the only slow solve.
+        app.trend = (0..50).map(|i| 10_000 + i * 10).collect();
+        app.trend[49] = 30_000;
+        let buffer = render_buffer(&app, 80, 34);
+        let rows = rows_of(&buffer);
+        let trend = rows
+            .iter()
+            .position(|row| row.contains("trend "))
+            .expect("the sparkline is drawn");
+
+        // The strip is 52 columns wide, so the eight-column prefix leaves 44 for the 50 bars.
+        assert_eq!(bars_in(&rows[trend + 1]), 44, "the window fills the panel");
+        assert_eq!(
+            bars_in(&rows[trend]),
+            1,
+            "only the newest solve reaches the top row, so the oldest eight were dropped"
+        );
+        render_all(&app);
     }
 
     #[test]

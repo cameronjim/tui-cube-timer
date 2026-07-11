@@ -36,6 +36,12 @@ const SESSIONS_FIXED_ROWS: usize = 3;
 
 /// Entries kept above the cursor in a scrolling list while it moves down.
 const LIST_LEAD: usize = 2;
+/// Text rows the stats strip has always had: the rolling averages, the session spread, the bests.
+pub(super) const STAT_ROWS: u16 = 3;
+/// Height of the stats block without a sparkline in it: its text rows and the two borders.
+pub(super) const STATS_H: u16 = STAT_ROWS + 2;
+/// Rows the trend sparkline occupies inside the stats block when it is drawn at all.
+pub(super) const TREND_H: u16 = 2;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
 /// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
@@ -175,6 +181,29 @@ pub(super) fn list_window(selected: usize, total: usize, rows: usize) -> (usize,
         start = selected.saturating_sub(rows - 1);
     }
     (start, rows.min(total - start))
+}
+
+/// Rows the trend sparkline gets inside the stats block: bars are solve times, so dips are good.
+///
+/// The sparkline is the first thing the left column gives up. It appears only while the timer
+/// still keeps its [`TIMER_MIN_H`] rows with the bars drawn, so every terminal too short for that
+/// renders exactly what it did before the trend existed. An empty trend never claims a row.
+pub(super) fn trend_rows(trend_len: usize, left_h: u16) -> u16 {
+    if trend_len == 0 || left_h < STATS_H.saturating_add(TREND_H).saturating_add(TIMER_MIN_H) {
+        return 0;
+    }
+    TREND_H
+}
+
+/// Height of the stats block, sparkline included; zero once the left column has nothing to spare.
+///
+/// The strip itself appears at the same height it always has, which is the one that leaves the
+/// timer [`TIMER_MIN_H`] rows, and only the sparkline is conditional on top of that.
+pub(super) fn stats_height(trend_len: usize, left_h: u16) -> u16 {
+    if left_h < STATS_H.saturating_add(TIMER_MIN_H) {
+        return 0;
+    }
+    STATS_H.saturating_add(trend_rows(trend_len, left_h))
 }
 
 /// Columns a stats row has left for its entries once the prefix column and its space are taken.
@@ -501,6 +530,63 @@ mod tests {
     fn fit_count_survives_absurd_widths() {
         assert_eq!(fit_count(&[usize::MAX, 1], u16::MAX), 1);
         assert_eq!(fit_count(&[1, usize::MAX], u16::MAX), 1);
+    }
+
+    // ---- the trend sparkline
+
+    #[test]
+    fn the_stats_strip_still_appears_exactly_where_it_always_has() {
+        // Twelve rows is five for the strip and seven for the block font, and not one fewer.
+        assert_eq!(stats_height(50, 11), 0);
+        assert_eq!(stats_height(50, 12), STATS_H);
+        assert_eq!(stats_height(50, 13), STATS_H);
+        assert_eq!(trend_rows(50, 12), 0, "the strip arrives before the bars do");
+    }
+
+    #[test]
+    fn the_sparkline_waits_until_the_timer_can_still_keep_its_glyph_rows() {
+        assert_eq!(trend_rows(50, 13), 0);
+        assert_eq!(trend_rows(50, 14), TREND_H, "five, then two bars, then seven");
+        assert_eq!(stats_height(50, 14), STATS_H + TREND_H);
+        assert_eq!(
+            stats_height(50, 60),
+            STATS_H + TREND_H,
+            "and the block never grows past the bars it has"
+        );
+    }
+
+    #[test]
+    fn an_empty_trend_costs_the_stats_block_nothing() {
+        for height in 0..60u16 {
+            assert_eq!(trend_rows(0, height), 0);
+            let expected = if height >= STATS_H + TIMER_MIN_H {
+                STATS_H
+            } else {
+                0
+            };
+            assert_eq!(
+                stats_height(0, height),
+                expected,
+                "a session with no times renders the strip it always did, at {} rows",
+                height
+            );
+        }
+    }
+
+    #[test]
+    fn the_stats_block_never_squeezes_the_timer_below_its_glyph_rows() {
+        for len in [0usize, 1, 50] {
+            for height in 0..60u16 {
+                let stats = stats_height(len, height);
+                assert!(
+                    stats == 0 || height.saturating_sub(stats) >= TIMER_MIN_H,
+                    "a {}-row column gave {} to the stats and left the timer {}",
+                    height,
+                    stats,
+                    height.saturating_sub(stats)
+                );
+            }
+        }
     }
 
     // ---- solve detail popup
