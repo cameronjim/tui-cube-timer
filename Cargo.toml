@@ -5,7 +5,7 @@ edition = "2021"
 description = "A speedcube timer TUI: scrambles, inspection, ao5/ao12/ao100, PBs"
 
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
