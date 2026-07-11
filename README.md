@@ -324,14 +324,19 @@ session rather than across the seam between two of them. On a narrow terminal a
 row drops entries from the right rather than wrapping, so the numbers you look at
 most stay put.
 
-When the window is tall enough, a one row sparkline labelled `trend` appears
+When the window is tall enough, a two row sparkline labelled `trend` appears
 under those three rows, plotting your last fifty solves with the newest at the
 right. The bars are times, so a dip is a fast solve and a rising staircase is a
-session going the wrong way. Every solve in the window draws a bar, however fast
-it was, so the row reads as one unbroken line. DNFs have no time to draw and are
-simply absent. It is the first thing the left column gives up: the moment the
-terminal is too short to hold both the bars and the big digits, the sparkline
-goes and the digits stay.
+session going the wrong way. They span the window itself rather than counting up
+from zero: your fastest solve of the fifty is the lowest bar, your slowest fills
+both rows, and everything else sits between the two. That makes the shape of a
+tight session readable instead of flattening it into one solid block, and it
+also means the bars say nothing about how you are doing against another day.
+Every solve in the window draws a bar, however fast it was, so the line never
+breaks, and a window with nothing to separate draws flat. DNFs have no time to
+draw and are simply absent. It is the first thing the left column gives up: the
+moment the terminal is too short to hold both the bars and the big digits, the
+sparkline goes and the digits stay.
 On a panel too narrow for fifty bars the oldest solves are dropped rather than
 the newest.
 

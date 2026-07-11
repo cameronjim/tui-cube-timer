@@ -277,6 +277,16 @@ substituted for it, so the bars are shorter than the window whenever a DNF is in
 a run of them simply leaves fewer bars. The series is oldest first and unsmoothed, and the
 bar height is a time rather than a score, which makes a dip a fast solve.
 
+Height is normalized to the window and not to zero. `ui::trend_bars` takes the minimum and
+the maximum of the window it is handed and maps each value onto the `TREND_LEVELS` heights
+the bars have, as `1 + (v - min) * (TREND_LEVELS - 1) / (max - min)`, so the fastest solve
+of the fifty is level 1 and the slowest is level `TREND_LEVELS`. Solve times cluster in a
+band far away from zero, and scaling from zero draws that band as a row of identical full
+bars saying nothing; scaling to the window's own range spends every level on the spread
+that is actually there. The floor of 1 is what keeps the line unbroken, since level 0 is
+a blank column. A window whose maximum equals its minimum has no range to spread over and
+is drawn flat at `TREND_FLAT`, half way up, rather than as a row of records.
+
 ---
 
 ## Scramble generation

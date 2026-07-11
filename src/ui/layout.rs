@@ -42,10 +42,10 @@ pub(super) const STAT_ROWS: u16 = 3;
 pub(super) const STATS_H: u16 = STAT_ROWS + 2;
 /// Rows the trend sparkline occupies inside the stats block when it is drawn at all.
 ///
-/// One, and never more: ratatui splits a bar across every row of the area it is given, so a
-/// two-row sparkline puts fragments in its top row wherever a bar passes half height and
-/// leaves the rest of that row blank, which reads as debris rather than as a trend.
-pub(super) const TREND_H: u16 = 1;
+/// Two, which is what the CP437-safe bar set can spend. Ratatui fills a bar column from the
+/// bottom row up, and with half and full blocks as the only glyphs those two rows stack into
+/// four distinct heights. A third row would buy a fifth height nobody reads off a skyline.
+pub(super) const TREND_H: u16 = 2;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
 /// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
@@ -547,16 +547,17 @@ mod tests {
     }
 
     #[test]
-    fn the_sparkline_is_one_row_tall_so_every_bar_is_drawn_whole() {
-        assert_eq!(TREND_H, 1, "ratatui splits a bar across the rows it is given");
-        assert_eq!(stats_height(50, 13), 6, "three text rows, the bars, two borders");
+    fn the_sparkline_is_two_rows_tall_so_a_bar_has_four_heights() {
+        assert_eq!(TREND_H, 2, "half and full blocks stack four heights in two rows");
+        assert_eq!(stats_height(50, 14), 7, "three text rows, two of bars, two borders");
     }
 
     #[test]
     fn the_sparkline_waits_until_the_timer_can_still_keep_its_glyph_rows() {
-        assert_eq!(trend_rows(50, 12), 0);
-        assert_eq!(trend_rows(50, 13), TREND_H, "five, then one of bars, then seven");
-        assert_eq!(stats_height(50, 13), STATS_H + TREND_H);
+        assert_eq!(trend_rows(50, 13), 0);
+        assert_eq!(trend_rows(50, 14), TREND_H, "five, then two of bars, then seven");
+        assert_eq!(stats_height(50, 13), STATS_H, "one row short and only the strip fits");
+        assert_eq!(stats_height(50, 14), STATS_H + TREND_H);
         assert_eq!(
             stats_height(50, 60),
             STATS_H + TREND_H,

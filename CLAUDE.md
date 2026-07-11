@@ -70,7 +70,7 @@ non-test lines with nothing to spare, so the next thing added to the state machi
 cut first, not after. **The seam waiting there is the inspection cluster**: the five
 `INSPECTION_*` constants with `start_inspection`, `cancel_inspection`, `refresh_inspection`
 and `on_key_inspecting` behind them, which is the one part of the timer that has its own
-vocabulary. Below it are `ui/mod.rs` at 450, `app/commands.rs` at 431, `cstimer.rs` at 372
+vocabulary. Below it are `ui/mod.rs` at 465, `app/commands.rs` at 431, `cstimer.rs` at 372
 and `storage.rs` at 345, none of which has an obvious seam left, so treat growth past
 roughly 500 in any of them as the prompt to look for one. `app/progress.rs` is the most
 recent cut and it shows the shape to aim for, as `app/selection.rs` and `ui/timer.rs` did

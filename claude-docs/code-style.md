@@ -142,7 +142,7 @@ No file in `src/` is over the line now, but one is close enough to name. `app/mo
 `app/progress.rs`, which is under 500 with nothing to spare; the next cut there is the
 inspection cluster, meaning the five `INSPECTION_*` constants with `start_inspection`,
 `cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind them. Below it are
-`ui/mod.rs` at 450, `app/commands.rs` at 431, `cstimer.rs` at 372 and `storage.rs` at 345,
+`ui/mod.rs` at 465, `app/commands.rs` at 431, `cstimer.rs` at 372 and `storage.rs` at 345,
 none of which has a seam worth cutting yet. Treat growth past roughly 500 in any of them as
 the prompt to look again.
 
