@@ -748,9 +748,17 @@ nothing yet.
 
 `src/cstimer.rs` converts between `SaveFile` and the JSON csTimer exports, in both
 directions and with no file handling of its own. The shape below was read off csTimer's
-source rather than guessed from a sample, because the two places it is counter-intuitive,
-the penalty encoding and the string-inside-string nesting, are exactly the places a guess
-would be wrong.
+source and checked against a file csTimer wrote, because the two places it is
+counter-intuitive, the penalty encoding and the string-inside-string nesting, are exactly
+the places a guess would be wrong.
+
+**The export is named `cstimer_YYYYMMDD_HHMMSS.txt` and the extension is not cosmetic.**
+csTimer's import is `<input type="file" accept="text/*">`, and Windows calls a `.json` file
+`application/json`, so a `.json` export is one the picker refuses to show. `default_file_name`
+builds the name from `types::format_timestamp`, which is UTC and prints no seconds, so it
+reduces that to its digits and takes the seconds off the clock itself; a clock far enough
+off to print a year outside four digits falls back to `cstimer_export.txt` rather than a
+malformed name.
 
 The top level is an object holding one `session<n>` key per session, numbered from 1, beside
 a `properties` object:
@@ -761,10 +769,18 @@ a `properties` object:
   "properties": {
     "sessionN": 1,
     "session": 1,
-    "sessionData": "{\"1\":{\"name\":\"main\",\"opt\":{\"scrType\":\"333\"},\"rank\":1}}"
+    "sessionData": "{\"1\":{\"name\":\"main\",\"opt\":{\"scrType\":\"333\"},\"rank\":1,\"stat\":[1,0,12340],\"date\":[1700000000,1700000000]}}"
   }
 }
 ```
+
+`properties` is csTimer's whole settings object and an import replaces it wholesale, which
+is why an export of ours puts csTimer's own preferences back to their defaults: only the
+three session keys above are written, and inventing values for the rest would be worse than
+leaving them out. `sessionN` is the one that has to be right, because csTimer's importer
+reads `session1` through `sessionN` and nothing past it. A file csTimer wrote can carry
+neither `sessionN` nor `session`, because it omits any property still holding its default,
+so their absence is not a sign they are optional for us.
 
 **One solve is a four-element tuple**, `[[penalty, millis], scramble, comment, timestamp]`:
 
@@ -792,7 +808,13 @@ second and loses only the milliseconds beneath it.
 
 **`sessionData` is a JSON-encoded string, not an object.** It maps each session index to
 its `name`, its `rank` and its `opt.scrType`, and `properties` itself is sometimes stored
-the same way. Both are decoded through one `as_object` helper that accepts either form, as
+the same way. A session csTimer has opened also carries `stat`, which is
+`[solves, DNFs, mean]`, and `date`, which is the first and last solve in Unix seconds.
+Neither is load bearing, csTimer recomputes both the moment the session is opened, but its
+session manager lists a session by them before anything opens it, so `session_summary`
+writes both for any session with solves and neither for an empty one, exactly as csTimer
+does. The mean is over `effective_millis` truncated to hundredths, which is how csTimer
+averages what it displays, and it is -1 when every solve is a DNF. Both are decoded through one `as_object` helper that accepts either form, as
 are the `session<n>` solve lists, so files written by older csTimer versions and by
 third-party converters all parse. `scr` is accepted as a fallback for `opt.scrType`,
 which is where the scramble type sat before csTimer moved it.

@@ -41,7 +41,11 @@ pub(super) const STAT_ROWS: u16 = 3;
 /// Height of the stats block without a sparkline in it: its text rows and the two borders.
 pub(super) const STATS_H: u16 = STAT_ROWS + 2;
 /// Rows the trend sparkline occupies inside the stats block when it is drawn at all.
-pub(super) const TREND_H: u16 = 2;
+///
+/// One, and never more: ratatui splits a bar across every row of the area it is given, so a
+/// two-row sparkline puts fragments in its top row wherever a bar passes half height and
+/// leaves the rest of that row blank, which reads as debris rather than as a trend.
+pub(super) const TREND_H: u16 = 1;
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
 /// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
@@ -539,15 +543,20 @@ mod tests {
         // Twelve rows is five for the strip and seven for the block font, and not one fewer.
         assert_eq!(stats_height(50, 11), 0);
         assert_eq!(stats_height(50, 12), STATS_H);
-        assert_eq!(stats_height(50, 13), STATS_H);
         assert_eq!(trend_rows(50, 12), 0, "the strip arrives before the bars do");
     }
 
     #[test]
+    fn the_sparkline_is_one_row_tall_so_every_bar_is_drawn_whole() {
+        assert_eq!(TREND_H, 1, "ratatui splits a bar across the rows it is given");
+        assert_eq!(stats_height(50, 13), 6, "three text rows, the bars, two borders");
+    }
+
+    #[test]
     fn the_sparkline_waits_until_the_timer_can_still_keep_its_glyph_rows() {
-        assert_eq!(trend_rows(50, 13), 0);
-        assert_eq!(trend_rows(50, 14), TREND_H, "five, then two bars, then seven");
-        assert_eq!(stats_height(50, 14), STATS_H + TREND_H);
+        assert_eq!(trend_rows(50, 12), 0);
+        assert_eq!(trend_rows(50, 13), TREND_H, "five, then one of bars, then seven");
+        assert_eq!(stats_height(50, 13), STATS_H + TREND_H);
         assert_eq!(
             stats_height(50, 60),
             STATS_H + TREND_H,

@@ -19,7 +19,7 @@ use crate::app::{App, InputMode};
 use crate::types::{format_millis, format_solve, Penalty};
 use layout::{
     fit_count, footer_height, header_height, inner_of, list_window, stat_budget, stats_height,
-    STAT_PREFIX_W, STAT_ROWS, STAT_SEP,
+    STAT_PREFIX_W, STAT_ROWS, STAT_SEP, TREND_H,
 };
 use timer::draw_timer;
 
@@ -211,6 +211,25 @@ fn stat_row(
 
 /// Prefix of the sparkline row, in the same column the three stats rows label themselves in.
 const TREND_LABEL: &str = "trend";
+/// Levels one row of bars has, which is ratatui's eighths from `▁` to `█`.
+const TREND_LEVELS: u64 = 8;
+
+/// The window as bar values, floored so the fastest solve still draws a bar.
+///
+/// Ratatui scales every bar against the tallest in the window and rounds down, so in a single
+/// row anything under an eighth of the slowest solve lands on the empty symbol and leaves a
+/// hole in the line. Lifting those to the shortest bar keeps the row unbroken, and every value
+/// above the floor stays proportional to the time it took.
+fn trend_bars(window: &[u64]) -> Vec<u64> {
+    let floor = window
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .div_ceil(TREND_LEVELS)
+        .max(1);
+    window.iter().map(|v| (*v).max(floor)).collect()
+}
 
 /// The last solves of the session as bars: bars are times, so a dip is a fast solve.
 ///
@@ -236,15 +255,16 @@ fn draw_trend(frame: &mut Frame, app: &App, area: Rect) {
         },
     );
 
+    // One row whatever the block hands over: a taller area splits each bar across its rows.
     let bars = Rect {
         x: area.x.saturating_add(label_w),
         y: area.y,
         width: area.width.saturating_sub(label_w),
-        height: area.height,
+        height: area.height.min(TREND_H),
     };
     let start = app.trend.len().saturating_sub(bars.width as usize);
     let spark = Sparkline::default()
-        .data(&app.trend[start..])
+        .data(trend_bars(&app.trend[start..]))
         .style(Style::default().fg(C_TIMING));
     frame.render_widget(spark, bars);
 }
@@ -780,7 +800,7 @@ mod tests {
         row.chars().filter(|c| "▁▂▃▄▅▆▇█".contains(*c)).count()
     }
 
-    /// Oldest first, slowest first, so the leading bar is full in both of the sparkline's rows.
+    /// Oldest first, slowest first, so the leading bar is the full one.
     fn seeded_trend() -> Vec<u64> {
         vec![20_000, 12_000, 13_500, 11_000, 14_000, 12_500]
     }
@@ -807,24 +827,47 @@ mod tests {
         );
 
         let values = label_col(&rows[current], "mo3");
-        for y in [trend, trend + 1] {
-            assert_eq!(
-                rows[y].chars().nth(values),
-                Some('█'),
-                "the slowest solve is a full bar starting where the numbers do: {:?}",
-                rows[y]
-            );
-            assert!(
-                bars_in(&rows[y]) > 1,
-                "both rows of the sparkline are drawn: {:?}",
-                rows[y]
-            );
-        }
+        assert_eq!(
+            rows[trend].chars().nth(values),
+            Some('█'),
+            "the slowest solve is a full bar starting where the numbers do: {:?}",
+            rows[trend]
+        );
+        assert_eq!(
+            bars_in(&rows[trend]),
+            seeded_trend().len(),
+            "one bar per solve, all of them on the one row: {:?}",
+            rows[trend]
+        );
         assert!(
-            rows[trend + 2].contains('╰'),
-            "and the stats block closes directly under the bars"
+            rows[trend + 1].contains('╰'),
+            "and the stats block closes directly under the single row of bars"
         );
         render_all(&app);
+    }
+
+    #[test]
+    fn every_solve_draws_a_bar_and_the_row_never_breaks() {
+        // A window whose fastest solve is under an eighth of its slowest, which is where a bar
+        // would round down to the empty symbol and put a hole in the middle of the line.
+        let mut app = app_with(Puzzle::Cube3, 30);
+        app.trend = vec![100, 1_180, 640, 100, 1_180, 200];
+        let buffer = render_buffer(&app, 80, 34);
+        let rows = rows_of(&buffer);
+        let current = rows
+            .iter()
+            .position(|row| row.contains("current "))
+            .expect("the stats strip is drawn");
+        let trend = current + 3;
+        let values = label_col(&rows[current], "mo3");
+
+        let drawn: String = rows[trend].chars().skip(values).take(app.trend.len()).collect();
+        assert_eq!(
+            drawn, "▁█▄▁█▁",
+            "six contiguous bars, the fastest solves floored to the shortest: {:?}",
+            rows[trend]
+        );
+        assert_eq!(bars_in(&rows[trend]), 6, "and nothing else on the row is a bar");
     }
 
     #[test]
@@ -832,11 +875,11 @@ mod tests {
         let mut app = app_with(Puzzle::Cube3, 30);
         app.trend = seeded_trend();
         assert!(
-            render(&app, 80, 21).contains("trend"),
-            "twenty-one rows still leaves the timer its glyph rows"
+            render(&app, 80, 20).contains("trend"),
+            "twenty rows still leaves the timer its glyph rows"
         );
 
-        let short = render(&app, 80, 20);
+        let short = render(&app, 80, 19);
         assert!(!short.contains("trend"), "one row fewer and the bars go first");
         assert!(short.contains("current "), "the stats rows themselves stay");
         assert!(short.contains('█'), "and so does the block font under them");
@@ -878,11 +921,13 @@ mod tests {
             .expect("the sparkline is drawn");
 
         // The strip is 52 columns wide, so the eight-column prefix leaves 44 for the 50 bars.
-        assert_eq!(bars_in(&rows[trend + 1]), 44, "the window fills the panel");
+        let values = label_col(&rows[trend - 3], "mo3");
+        assert_eq!(bars_in(&rows[trend]), 44, "the window fills the panel");
         assert_eq!(
-            bars_in(&rows[trend]),
-            1,
-            "only the newest solve reaches the top row, so the oldest eight were dropped"
+            rows[trend].chars().nth(values + 43),
+            Some('█'),
+            "the newest solve is the tall bar at the right, so the oldest six were dropped: {:?}",
+            rows[trend]
         );
         render_all(&app);
     }

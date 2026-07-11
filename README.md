@@ -147,6 +147,7 @@ spaces do not matter.
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
 | `/delsession [id]` | delete a session and its solves, current one by default |
+| `/delsession <from>-<to>` | delete every session in that id range, defaults refused |
 | `/dnf` `/+2` `/ok` | set or clear the penalty on your last solve |
 | `/del [n]` | delete solve number `n`, or your newest solve if you leave `n` off |
 | `/inspect` | turn 15 second inspection on or off |
@@ -224,6 +225,14 @@ takes the one you are in, and with an id it takes that one, so you can clear out
 a session without switching to it first. Deleting the session you are in leaves
 you on the default for its puzzle. The twelve defaults are refused.
 
+A range takes several at once: `/delsession 15-20` deletes every session from id
+15 through id 20, both ends included. Ids in the range that belong to one of the
+twelve defaults are refused and ids nothing sits on are passed over, both counted
+rather than named, so the status reads `deleted 4 sessions (2 skipped)` and
+`/delsession 13-9999` is a way to clear out every session you ever made. If the
+one you are in goes with them you land on the default for its puzzle, exactly as
+deleting it on its own would. A backwards range like `20-15` is refused.
+
 ## Where your times live
 
 Every solve is saved the moment you stop the timer, and so is every command that
@@ -249,14 +258,25 @@ you the path rather than starting fresh over the top of it.
 
 Cubetimer reads and writes csTimer's export format, so your history is not
 trapped in either program. `/export` writes every session, solves, scrambles,
-penalties and timestamps included, to `cubetimer-cstimer-export.json` in the
-directory you started Cubetimer from, and the status line tells you the full
-path it landed at. Give it an argument, as in `/export C:\backups\times.json`,
-and it writes there instead. Nothing about your save file changes, so exporting
-is also the quickest way to take a backup. What comes out is the shape csTimer's
-own importer reads, and reading it back into Cubetimer returns every solve as it
+penalties and timestamps included, to a file named the way csTimer names its
+own, `cstimer_20260802_141534.txt` for an export taken at that moment, in the
+directory you started Cubetimer from. The date and time in the name are UTC. The
+status line tells you the full path it landed at. Give it an argument, as in
+`/export C:\backups\times.txt`, and it writes there instead. Nothing about your
+save file changes, so exporting is also the quickest way to take a backup.
+
+Keep the `.txt` ending on any name you choose. csTimer's import button opens a
+file picker that only offers text files, and Windows calls a `.json` file
+something else, so a `.json` export is one the picker will not show you.
+
+What comes out is the shape csTimer's own importer reads: hand it to the
+from-file import in csTimer's export panel and every session, every name and
+every solve arrives. Reading it back into Cubetimer returns every solve as it
 was, give or take the fraction of a second in a timestamp that csTimer counts in
-whole seconds.
+whole seconds. One thing to know before you import into csTimer: it replaces all
+of its own settings with whatever the file carries, and a Cubetimer export
+carries session data and nothing else, so csTimer's preferences go back to their
+defaults.
 
 `/import <path>` goes the other way and reads a file csTimer exported. Every
 session in it arrives as a **new** session of your own with the next free id,
@@ -304,12 +324,14 @@ session rather than across the seam between two of them. On a narrow terminal a
 row drops entries from the right rather than wrapping, so the numbers you look at
 most stay put.
 
-When the window is tall enough, a two row sparkline labelled `trend` appears
+When the window is tall enough, a one row sparkline labelled `trend` appears
 under those three rows, plotting your last fifty solves with the newest at the
 right. The bars are times, so a dip is a fast solve and a rising staircase is a
-session going the wrong way. DNFs have no time to draw and are simply absent. It
-is the first thing the left column gives up: the moment the terminal is too short
-to hold both the bars and the big digits, the sparkline goes and the digits stay.
+session going the wrong way. Every solve in the window draws a bar, however fast
+it was, so the row reads as one unbroken line. DNFs have no time to draw and are
+simply absent. It is the first thing the left column gives up: the moment the
+terminal is too short to hold both the bars and the big digits, the sparkline
+goes and the digits stay.
 On a panel too narrow for fifty bars the oldest solves are dropped rather than
 the newest.
 
