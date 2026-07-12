@@ -1,10 +1,12 @@
 //! Timer state machine and key handling; `ui` renders only from [`App`] fields refreshed here.
 //!
-//! The three clusters that answer their own question live beside this file: [`commands`] runs
-//! the `/command` line, [`selection`] owns the times cursor and the two list overlays, and
-//! [`repair`] makes a parsed save file internally consistent.
+//! The four clusters that answer their own question live beside this file: [`commands`] runs
+//! the `/command` line, [`selection`] owns the times cursor and the two list overlays,
+//! [`progress`] owns the trend and the personal-best celebration, and [`repair`] makes a
+//! parsed save file internally consistent.
 
 mod commands;
+mod progress;
 mod repair;
 mod selection;
 #[cfg(test)]
@@ -58,9 +60,14 @@ pub struct App {
     pub scramble: String,
     pub status_msg: Option<String>,
     pub show_help: bool,
+    /// Whether the trend graph is open over the frame.
+    ///
+    /// Non-modal like [`App::show_help`] and mutually exclusive with it and the sessions picker.
+    pub show_trend: bool,
     /// Open sessions overlay, holding the cursor's index into `save.sessions`.
     ///
-    /// Mutually exclusive with [`App::show_help`]; the solve detail wins over both.
+    /// Mutually exclusive with [`App::show_help`] and [`App::show_trend`]; the solve detail wins
+    /// over all three.
     pub sessions_overlay: Option<usize>,
     /// Times-list cursor, counted from the newest solve: 0 is the newest.
     pub times_selected: usize,
@@ -79,6 +86,14 @@ pub struct App {
     pub stats: SessionStats,
     /// All-time bests across every session of the active puzzle, cached by [`App::refresh_derived`].
     pub pbs: PersonalBests,
+    /// Effective times of the last [`TREND_LEN`](progress::TREND_LEN) solves of the active
+    /// session, oldest first.
+    ///
+    /// DNFs are dropped, so this is shorter than the window it covers whenever one is in range.
+    pub trend: Vec<u64>,
+    /// The personal-best celebration currently on screen, cleared after
+    /// [`PB_BANNER`](progress::PB_BANNER).
+    pub pb_banner: Option<String>,
 
     // --- internal bookkeeping (not part of the ui contract) ---
     /// Inspection start, kept while armed so an aborted arm restores the countdown.
@@ -87,6 +102,8 @@ pub struct App {
     inert_key: Option<KeyCode>,
     /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN` after it.
     stopped_at: Option<Instant>,
+    /// When the current [`App::pb_banner`] went up; `on_tick` retires it five seconds later.
+    banner_since: Option<Instant>,
 }
 
 impl App {
@@ -108,6 +125,7 @@ impl App {
             scramble: scramble::generate(puzzle),
             status_msg: None,
             show_help: false,
+            show_trend: false,
             sessions_overlay: None,
             times_selected: 0,
             solve_detail: None,
@@ -119,17 +137,20 @@ impl App {
             data_path,
             stats: SessionStats::default(),
             pbs: PersonalBests::default(),
+            trend: Vec::new(),
+            pb_banner: None,
             inspection_start: None,
             inert_key: None,
             stopped_at: None,
+            banner_since: None,
         };
         app.refresh_derived();
         app
     }
 
-    /// Recompute the statistics `ui` renders from.
+    /// Recompute the statistics and the trend `ui` renders from.
     ///
-    /// Both walk every solve of the puzzle, so the 15 ms draw loop must never call them.
+    /// They walk every solve of the puzzle, so the 15 ms draw loop must never call them.
     /// Every path that changes the solve list, a penalty, the session list or the active
     /// session calls this instead; `/rename` is the one mutation that changes neither.
     fn refresh_derived(&mut self) {
@@ -142,8 +163,10 @@ impl App {
             .filter(|s| s.puzzle == puzzle)
             .collect();
         let pbs = stats::personal_bests(&of_puzzle);
+        let trend = progress::trend_of(&self.current_session().solves);
         self.stats = stats;
         self.pbs = pbs;
+        self.trend = trend;
     }
 
     fn active_index(&self) -> usize {
@@ -194,14 +217,6 @@ impl App {
         self.status_msg = Some(msg.into());
     }
 
-    /// Toggle the help overlay. The two popups are alternatives, so opening one closes the other.
-    fn toggle_help(&mut self) {
-        self.show_help = !self.show_help;
-        if self.show_help {
-            self.sessions_overlay = None;
-        }
-    }
-
     fn start_inspection(&mut self) {
         let now = Instant::now();
         self.state = TimerState::Inspecting { started: now };
@@ -247,6 +262,7 @@ impl App {
         self.state = TimerState::Timing {
             started: Instant::now(),
         };
+        self.clear_pb_banner();
         self.inspection_start = None;
         self.inspection_remaining = None;
         self.inspection_stage = 0;
@@ -257,6 +273,8 @@ impl App {
     /// Record the running solve, persist, and return to Idle with a fresh scramble.
     fn finish_solve(&mut self, started: Instant) {
         let millis = started.elapsed().as_millis() as u64;
+        // The records to beat, read before this solve joins them.
+        let (prev_single, prev_ao5) = (self.pbs.single, self.pbs.ao5);
         let solve = Solve {
             millis,
             penalty: self.pending_inspection_penalty,
@@ -274,6 +292,7 @@ impl App {
         self.stopped_at = Some(Instant::now());
         self.new_scramble();
         self.refresh_derived();
+        self.note_pb(prev_single, prev_ao5);
         self.save_now();
     }
 
@@ -286,6 +305,7 @@ impl App {
     // ------------------------------------------------------------------- tick
 
     pub fn on_tick(&mut self) {
+        self.expire_pb_banner();
         match self.state {
             TimerState::Idle => {}
             TimerState::Inspecting { started } => {
@@ -414,9 +434,7 @@ impl App {
                 }
                 KeyCode::Char('h') | KeyCode::Char('?') => self.toggle_help(),
                 KeyCode::Esc => {
-                    if self.show_help {
-                        self.show_help = false;
-                    } else {
+                    if !self.close_popups() {
                         self.status_msg = None;
                     }
                 }
@@ -1066,6 +1084,29 @@ mod tests {
 
         app.on_key(press(KeyCode::Esc));
         assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_trend_graph_before_it_clears_the_status() {
+        let (mut app, _g) = test_app("key-esc-trend");
+        app.show_trend = true;
+        app.status_msg = Some("something".to_string());
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_trend);
+        assert_eq!(app.status_msg.as_deref(), Some("something"));
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn h_opens_the_help_over_an_open_trend_graph() {
+        let (mut app, _g) = test_app("key-h-trend");
+        app.show_trend = true;
+        app.on_key(press(KeyCode::Char('h')));
+        assert!(app.show_help, "'h' still reaches the help");
+        assert!(!app.show_trend, "and the graph gives way to it");
     }
 
     // ------------------------------------------------------------ constructor

@@ -18,8 +18,8 @@ use ratatui::Frame;
 use crate::app::{App, InputMode};
 use crate::types::{format_millis, format_solve, Penalty};
 use layout::{
-    fit_count, footer_height, header_height, inner_of, list_window, stat_budget, STAT_PREFIX_W,
-    STAT_SEP,
+    fit_count, footer_height, header_height, inner_of, list_window, stat_budget, stats_height,
+    STAT_PREFIX_W, STAT_ROWS, STAT_SEP,
 };
 use timer::draw_timer;
 
@@ -34,6 +34,8 @@ const C_LABEL: Color = Color::DarkGray;
 const C_ACCENT: Color = Color::Magenta;
 const C_BEST: Color = Color::Green;
 const C_WORST: Color = Color::Red;
+/// A personal best just set: the banner over the digits and the digits under it.
+const C_PB: Color = Color::LightGreen;
 /// Inspection past eight seconds.
 const C_STAGE1: Color = Color::LightMagenta;
 /// Inspection past twelve seconds.
@@ -86,6 +88,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         overlay::draw_detail(frame, app, index, area);
     } else if let Some(cursor) = app.sessions_overlay {
         overlay::draw_sessions(frame, app, cursor, area);
+    } else if app.show_trend {
+        overlay::draw_trend(frame, app, area);
     } else if app.show_help {
         overlay::draw_help(frame, area);
     }
@@ -154,8 +158,8 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(side_w)])
         .split(area);
 
-    // Stats strip is 3 text rows + borders; drop it when the body is short.
-    let stats_h: u16 = if cols[0].height >= 12 { 5 } else { 0 };
+    // Stats strip is 3 text rows and its two borders, or nothing at all.
+    let stats_h = stats_height(cols[0].height);
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(stats_h)])
@@ -211,9 +215,14 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let inner = inner_of(area);
+    frame.render_widget(panel("stats"), area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     let st = &app.stats;
     let pb = &app.pbs;
-    let width = area.width.saturating_sub(2);
+    let width = inner.width;
 
     // The first and last rows carry the same five windows, so a rolling average sits directly
     // above the best that window has ever been. The session's own spread goes between them.
@@ -255,8 +264,12 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         width,
     );
 
-    let p = Paragraph::new(Text::from(vec![averages, session, bests])).block(panel("stats"));
-    frame.render_widget(p, area);
+    // The block is sized to hold exactly these three, but clip rather than trust that.
+    let rows = Rect {
+        height: inner.height.min(STAT_ROWS),
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(Text::from(vec![averages, session, bests])), rows);
 }
 
 // ---------------------------- times list (newest first, with a selection)

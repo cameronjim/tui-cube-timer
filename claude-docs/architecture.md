@@ -1,7 +1,7 @@
 # Cubetimer architecture
 
 Cubetimer is a speedcube timer that lives entirely in the terminal. It is a single Rust
-binary crate (`cubetimer`) built on ratatui 0.29 and its bundled crossterm backend. This
+binary crate (`cubetimer`) built on ratatui 0.30 and its bundled crossterm backend. This
 document explains how the program is put together: what each module owns, how a frame
 gets on screen, how key events become timer transitions, and how solves reach disk.
 
@@ -14,20 +14,27 @@ conventions live in [../CLAUDE.md](../CLAUDE.md); code style rules are in
 
 ## Crate layout
 
-Seven modules, each with one job. Three of them are directories, because their single
+Eight modules, each with one job. Three of them are directories, because their single
 responsibility grew large enough to need internal structure. The boundaries are
-deliberate: `stats` and `scramble` are pure and know nothing about terminals, `ui` is
-read-only with respect to state, and only `storage` touches the filesystem.
+deliberate: `stats`, `scramble` and `cstimer` are pure and know nothing about terminals,
+`ui` is read-only with respect to state, and only `storage` touches the filesystem.
 
 | Module | Owns | Depends on |
 | --- | --- | --- |
 | `src/main.rs` | Terminal setup and teardown, startup load, the event loop | `app`, `storage`, `ui` |
-| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `scramble`, `stats`, `storage`, `types` |
+| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `scramble`, `stats`, `storage`, `types` |
 | `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `types` |
 | `src/scramble/` | Scramble generation per puzzle | `types`, `rand` |
 | `src/stats.rs` | Averages, session summaries, personal bests | `types` |
+| `src/cstimer.rs` | Conversion between `SaveFile` and csTimer's export format, both directions | `types`, `serde_json` |
 | `src/storage.rs` | Data file location, JSON load and atomic save, format migration, wall clock | `types` |
 | `src/types.rs` | `Puzzle`, `Penalty`, `Solve`, `Session`, `Settings`, `SaveFile`, the default-session ids, time and date formatting | serde only |
+
+`cstimer.rs` is a pair of pure functions, `export(&SaveFile) -> String` and
+`import(&str) -> Result<Import, String>`, and it opens nothing. `/export` and `/import` in
+`app/commands.rs` own the file handling and the id bookkeeping on the way in, which keeps
+the format knowledge in one file and the IO where every other write already is. The format
+itself is described in [algorithms.md](algorithms.md).
 
 `src/scramble/` is one file per puzzle family behind a dispatching `mod.rs`. The
 generators share nothing but the `Rng` they are handed, because the puzzles have no
@@ -46,36 +53,41 @@ notation in common:
 `src/ui/` splits the same way, along the line between drawing and arithmetic. `mod.rs`
 holds `draw`, the header, the stats strip, the times list and the status line; `timer.rs`
 holds the big countdown in the middle of the frame and the block font it is drawn in;
-`overlay.rs` holds the three popups, the help reference, the session picker and one solve in
-full, which are the only things drawn over the frame rather than into it; `layout.rs` holds
+`overlay.rs` holds the four popups, the help reference, the session picker, the trend graph
+and one solve in full, which are the only things drawn over the frame rather than into it;
+`layout.rs` holds
 the pure geometry, meaning panel heights, word wrapping, popup placement, the visible slice
 of a scrolling list and `inner_of`. Nothing in `layout.rs` sees a `Frame` or an `App`, which
 is what makes the degradation rules testable as ordinary functions rather than by eye.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, stats, times list and status line | 367 |
-| `timer.rs` | `timer_view`, `draw_timer`, `GLYPH_H` and the 5-row block font | 181 |
-| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 238 |
-| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, popup placement | 239 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 380 |
+| `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_detail`, `trend_plot` | 391 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 280 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
 the single `pub(super) fn on_command_key` and never touched from outside `app`.
-`selection.rs` is the state that says which solve or session you are pointing at, which the
-timer never reads: the times cursor, the solve-detail overlay and the sessions picker.
-`repair.rs` answers "is this save file internally consistent", which nothing in the timer
-flow ever asks, and is a handful of free functions over `&mut SaveFile` rather than `App`
-methods. The split is invisible from outside: `crate::app::App` and its public fields and
-methods keep the paths they had when `app` was one file.
+`selection.rs` is the state that says which solve or session you are pointing at and which
+overlay is up, none of which the timer reads: the times cursor, the solve-detail overlay,
+the sessions picker and the two non-modal toggles behind `/help` and `/trend`.
+`progress.rs` answers "how is this session going", which is the trend window and the
+personal-best celebration, neither of which is timer state. `repair.rs` answers "is this
+save file internally consistent", which nothing in the timer flow ever asks, and is a
+handful of free functions over `&mut SaveFile` rather than `App` methods. The split is
+invisible from outside: `crate::app::App` and its public fields and methods keep the paths
+they had when `app` was one file.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 475 |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 303 |
-| `selection.rs` | `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 116 |
+| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 493 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 432 |
+| `selection.rs` | `toggle_help`, `toggle_trend`, `close_popups`, `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 150 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
-| `testkit.rs` | `#[cfg(test)]` scaffolding the other four share: `TempPath`, `test_app`, `press`, `run_command` | 137 |
+| `progress.rs` | `trend_of`, `pb_banner_text`, `note_pb`, `clear_pb_banner`, `expire_pb_banner` | 76 |
+| `testkit.rs` | `#[cfg(test)]` scaffolding the other five share: `TempPath`, `test_app`, `press`, `run_command` | 147 |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
 to persistence or rendering never ripples into it. The dependency graph is acyclic and
@@ -86,8 +98,8 @@ Three rules keep the seams clean:
 
 1. **`ui` never does `Instant` math.** Anything time-derived that the renderer needs
    is precomputed into plain fields on `App` (`display_millis`, `inspection_remaining`,
-   `pending_inspection_penalty`, `inspection_stage`) by `App::on_tick` or by a state
-   transition. The renderer reads numbers, not clocks.
+   `pending_inspection_penalty`, `inspection_stage`, `pb_banner`) by `App::on_tick` or by a
+   state transition. The renderer reads numbers, not clocks.
 2. **`ui` never computes statistics either.** `App::stats` and `App::pbs` are cached and
    the renderer reads them. See below for why this is a rule and not a preference.
 3. **`app` never draws and `ui` never mutates.** `draw(frame: &mut Frame, app: &App)`
@@ -121,6 +133,51 @@ numbers actually change, which is at most once per solve.
 
 The 64 MB read limit in `storage::load`, described under Persistence, is the other half
 of the same fix: it bounds how large the input can be before any of this runs.
+
+### The trend window and the personal-best banner
+
+Two more read-only fields exist for the same reason, and both live behind
+`app/progress.rs`:
+
+```rust
+/// Effective times of the last `TREND_LEN` solves of the active session, oldest first.
+pub trend: Vec<u64>,
+/// The personal-best celebration currently on screen, cleared after `PB_BANNER`.
+pub pb_banner: Option<String>,
+```
+
+`trend` is what `ui::overlay::draw_trend` plots, through `trend_plot` into a ratatui `Chart`.
+`progress::trend_of` takes the last `TREND_LEN` of 50 solves of the active session and keeps
+their `effective_millis()`, so a `+2` plots as the time it cost and a DNF, having no time, is
+absent rather than zero. It is refreshed by `refresh_derived` alongside the statistics, on
+exactly the same set of mutations, which is why a penalty change or a session switch moves
+the line immediately, whether the popup is open at the time or not.
+
+`pb_banner` is the celebration line, and `banner_since` beside it is the private `Instant`
+that retires it. `finish_solve` reads `pbs.single` and `pbs.ao5` *before* the new solve
+joins them, calls `refresh_derived`, and then calls `note_pb` with the two old values;
+`pb_banner_text` compares old against new and names each one the solve strictly beat:
+
+```rust
+fn improved(prev: Option<u64>, now: Option<u64>) -> Option<u64> {
+    match (prev, now) {
+        (Some(p), Some(n)) if n < p => Some(n),
+        _ => None,
+    }
+}
+```
+
+The `Some(p)` is the rule that keeps a first-ever record quiet: there was nothing to beat,
+so nothing is celebrated. The strict `<` is the rule that keeps an equalled record quiet
+too. Because the comparison runs against `App::pbs`, which `refresh_derived` builds from
+the sessions of the active puzzle only, a 2x2 record can never raise the banner on 3x3.
+
+The banner comes down two ways: `expire_pb_banner`, called first thing in `on_tick`, drops
+it once `PB_BANNER` of five seconds has passed, and `start_timing` drops it because the
+next solve has begun. Arming does not, so glancing at the banner and reaching for the space
+bar does not cost you the rest of the five seconds. `ui::timer` reads the field twice, once
+for the bold black-on-light-green line it inserts above the digits and once to colour the
+idle digits underneath in the same light green.
 
 ### Selection state and the judge-call stage
 
@@ -364,7 +421,10 @@ if let TimerState::Timing { started } = self.state {
 pending inspection penalty, the scramble that was on screen and a wall-clock timestamp
 from `storage::now_millis()`, pushes it onto the active session, clears the pending
 penalty, sets `display_millis` to the final time so the frozen result stays on screen,
-stamps `stopped_at`, generates a fresh scramble and writes the save file.
+stamps `stopped_at`, generates a fresh scramble, refreshes the derived fields, raises the
+personal-best banner if the solve earned one, and writes the save file. The order of the
+last three matters: the banner is decided by comparing the records read before the push
+against the ones `refresh_derived` has just recomputed.
 
 ### Two guards after a stop
 
@@ -404,11 +464,12 @@ the scroll keys and `q` all keep working immediately after a solve.
 **Ctrl-C** is checked before both guards and sets `should_quit` unconditionally, since raw
 mode swallows the signal the shell would normally deliver.
 
-### Selection: the times cursor and the two list overlays
+### Selection: the times cursor and the four overlays
 
 Everything in this section lives in `app/selection.rs`. It is reached from keys the timer
 does not want, and it changes no timer state, which is the whole reason it is not in
-`mod.rs`.
+`mod.rs`. That includes `toggle_help`, `toggle_trend` and `close_popups`, the three
+functions behind the two overlays that are flags rather than cursors.
 
 The times list carries a selection rather than a scroll offset. `on_key_idle` hands the
 cursor keys to `on_key_times`, which moves `times_selected` by 1 for the arrows and `j`/`k`,
@@ -441,12 +502,14 @@ if self.sessions_overlay.is_some() {
 }
 ```
 
-The precedence runs **detail > sessions > help**. Detail outranks sessions because you can
-only have opened it on top of the list, so closing gives back the thing underneath rather
-than the whole screen at once. Help is not modal and cannot be open beside the sessions
-picker at all: `toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
-`show_help`, so the exclusion is enforced where the state changes rather than in the
-renderer.
+The precedence runs **detail > sessions > trend > help**. Detail outranks sessions because
+you can only have opened it on top of the list, so closing gives back the thing underneath
+rather than the whole screen at once. Neither the trend graph nor the help is modal, and no
+two of the bottom three can be open at once: `toggle_help` and `toggle_trend` each clear
+the other two, and `open_sessions_overlay` clears both flags, so the exclusion is enforced
+where the state changes rather than in the renderer. `Esc` in `on_key_idle` goes through
+`close_popups`, which takes down whichever of the two flags is up and reports whether there
+was one, so a bare `Esc` still clears the status line when there is no popup to close.
 
 Only three keys do anything inside the detail overlay: `r` calls `recall_scramble`, `Esc`
 and `Enter` close. Because both branches sit below the `Timing` check, a solve running
@@ -498,10 +561,14 @@ produces `unknown command: <verb>` in the status line.
 | `/session <id>` | Activate a session by id, adopting its puzzle |
 | `/rename <name>` | Rename the active session, refused on a default |
 | `/delsession [id]` | Delete a session and its solves, the active one by default |
+| `/delsession <from>-<to>` | Delete every user session in that inclusive id range |
 | `/del [n]`, `/delete [n]` | Remove solve `n` as the times list numbers it, the most recent by default |
 | `/dnf`, `/+2`, `/ok` | Set the most recent solve's penalty |
 | `/inspect` | Toggle 15-second inspection, persisted |
 | `/hidetime` | Toggle masking the running time, persisted |
+| `/export [path]` | Write every session out as a csTimer export, `cstimer_YYYYMMDD_HHMMSS.txt` by default |
+| `/import <path>` | Adopt a csTimer export, every session in it as a new one |
+| `/trend` | Toggle the trend graph overlay |
 | `/help` | Toggle the help overlay |
 | `/quit`, `/q` | Quit |
 
@@ -515,6 +582,22 @@ at a solve that has moved.
 `/inspect` and `/hidetime` are the only commands whose effect outlives the run. Both flip a
 field of `SaveFile::settings` and save, which is all persistence takes: `Settings` is part
 of the serialised file, so the next `storage::load` hands the preference straight back.
+
+`/export` and `/import` are the two commands that touch a file other than the save file,
+and they are the only callers of `cstimer`. `cmd_export` serialises `self.save` and writes
+the result with `fs::write`, defaulting to `cstimer::default_file_name(storage::now_millis())`
+in the working directory, which is csTimer's own `cstimer_YYYYMMDD_HHMMSS.txt` naming in UTC.
+The `.txt` matters: csTimer's import file picker accepts `text/*` and hides a `.json` file.
+`shown_path` resolves a relative path against the current
+directory so the status line names somewhere the user can actually go and look. It changes
+no session, no solve and no setting, and it does not call `save_now`, so an export is safe
+at any moment. `cmd_import` reads
+the file, hands the text to `cstimer::import`, and adopts each session it gets back through
+the same `push_session` that `/new` uses, so every arrival takes the next free id from
+`repair::take_id`. **An import never merges.** It writes into no session that already
+exists, leaves `active_session_id` alone, and reports `imported <n> sessions` with
+`(<n> skipped)` appended when the file held session kinds Cubetimer has no event for. Both
+commands report an IO or parse failure on the status line and change nothing.
 
 Every mutating command calls `save_now()`. Failures never propagate: `save_now` catches
 the `io::Error` and puts `save failed: <error>` in `status_msg`, so a read-only disk
@@ -590,6 +673,17 @@ Either way the scramble is regenerated for the new puzzle and the file is saved.
 active session when there is none, refuses defaults and unknown ids with a status message,
 and when the session being deleted is the active one it activates that session's puzzle
 default, which is guaranteed to exist by the invariant above.
+
+An argument holding a `-` after its first character is a range instead, and
+`cmd_delete_session_range` handles it: one `retain` over `sessions`, one fallback check, one
+`refresh_derived` and one save, however many sessions go. Nothing in the range has to exist
+and nothing in it has to be deletable, so rather than reporting a default and a free id one
+by one it counts them, as the span of the range less the number actually removed, and says
+`deleted 4 sessions (2 skipped)`. That arithmetic is also what keeps `/delsession 13-99999`
+from walking a range of ninety thousand ids. A reversed range is a usage error, and a
+bound that is not a number is the usage line, but a leading `-` still parses as a malformed
+single id so `/delsession -1` answers what it always did. The fallback puzzle is read before
+the `retain`, because the session holding it may be one of the ones going.
 
 `/new` names an unnamed session `session N`, where N is one more than the number of
 existing sessions for that puzzle, so the counter is per-puzzle rather than global. Any
@@ -744,6 +838,17 @@ Saves happen on **every solve** and on every mutating command, not on a timer an
 at exit. A crash or a closed terminal costs nothing. `main.rs` does one final save after
 restoring the terminal, and reports a failure on stderr where it is visible.
 
+### The csTimer file is not the save file
+
+`/export` and `/import` read and write a second, unrelated JSON shape, and none of this
+section applies to it. It is never loaded at startup, it carries no `version` field of
+Cubetimer's, and `cstimer::import` returns sessions with id 0 for the caller to number
+rather than anything that could be dropped into a `SaveFile` as it stands. Keeping the two
+apart is deliberate: the save format is a compatibility contract with files already on
+users' disks, while the csTimer format is a contract with another program and moves when
+that program moves. A change to one is never a reason to touch the other, and only
+`storage.rs` decides where Cubetimer's own data lives.
+
 ---
 
 ## How `ui` degrades
@@ -791,8 +896,12 @@ panic and without a blank screen:
   0 and it is not drawn at all.
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
-- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0. Its
-  three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
+- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0.
+  `stats_height` is the whole of that decision, and its threshold is written against
+  `TIMER_MIN_H`, so the numbers can never be the reason the block font is lost: a column
+  that cannot hold both keeps the big digits.
+
+  The three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
   the width of `current`, the longest of the three prefixes) plus a space: `current` over
   `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
   `best single, worst single, mean, solves`, then `best` over the same five windows again,
@@ -816,10 +925,39 @@ panic and without a blank screen:
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
   coloured line, so the time is always legible even in a two-row body.
+- **Personal-best banner**, the line `draw_timer` inserts above the digits while
+  `App::pb_banner` is `Some`, is added only when the panel has a row left after the digits
+  themselves, so it is the first thing the timer panel gives up and the time is never
+  pushed off the screen by its own celebration.
 - **State caption**, the dim line under the digits that names what the timer is doing
   (`inspecting`, `keep holding…`, `release to start` and so on), is only appended when at
   least two spare rows remain after the digits.
-- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 28
+- **Trend overlay** is the only popup that grows with the terminal. `trend_popup` takes the
+  area less `TREND_MARGIN` (4) on each axis, caps it at `TREND_W` by `TREND_H` (72 by 22),
+  and returns `None` below `TREND_MIN_W` by `TREND_MIN_H` (40 by 12), which is the smallest
+  frame the axis labels and the hint leave a readable line inside. `draw_trend` keeps the
+  bottom inner row for `esc: close` exactly as the sessions popup does and gives the rest to
+  a ratatui `Chart`, and an empty `App::trend` gets a centered `no solves to plot yet`
+  instead of two empty axes.
+
+  The chart is one `Dataset` with `GraphType::Line` and `Marker::HalfBlock`, drawn in
+  `C_TIMING`. The marker is the load-bearing choice. Ratatui's default is braille, and the
+  sparkline this replaced used the eighth blocks `▁` through `█`; the classic Windows
+  console fonts carry neither, so on the platform Cubetimer targets first the whole graph
+  came out as tofu boxes. `HalfBlockGrid` emits `▀` (U+2580), `▄` (U+2584) and `█` (U+2588)
+  and nothing else, and the axes ratatui draws are `─`, `│` and `└`, so every glyph in the
+  popup is CP437 and every console font has it. Half blocks also double the vertical
+  resolution, which is what makes 20 rows of graph worth 40 steps of time.
+
+  Both axes are labelled, in `dim()`. The y axis carries three ticks from `trend_ticks`,
+  bottom to top, which is the order ratatui stacks them: the window minimum, the midpoint,
+  and the ceiling, each through `types::format_millis`. The top tick is a ceiling and not
+  necessarily your slowest solve, because `trend_plot` pins it to the window's 95th
+  percentile and clamps everything above onto it; the reasoning is in
+  [algorithms.md](algorithms.md). The x axis carries the first and last solve numbers of
+  the window. The whole window is plotted whatever the width, since a line survives two
+  solves sharing a column and dropping the oldest would make the x axis lie.
+- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 30
   text rows inside its border, placed by `centered()`, which clamps both to the available
   area. It is skipped entirely below 4 by 4. The height follows the content rather than
   being a constant because the content grows: `draw_help` builds the puzzle row from
@@ -846,12 +984,13 @@ panic and without a blank screen:
   `draw_detail` returns early below 4 by 4.
 
 `draw` picks one popup and only one, in the same order `on_key` does: detail, then sessions,
-then help. The detail popup wins because it is the one the user just asked for and the only
-thing that can be opened on top of the list. Help and sessions cannot both be open in the
-first place: `App::toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
-`show_help`, so the exclusion is enforced where the state changes rather than in the
-renderer. Help is the only non-modal popup of the three, so the keys behind it keep working
-and `Esc` closes it before it moves on to clearing the status line.
+then trend, then help. The detail popup wins because it is the one the user just asked for
+and the only thing that can be opened on top of the list. No two of the other three can be
+open in the first place: `App::toggle_help` and `App::toggle_trend` each clear the other
+flag and `sessions_overlay`, and `open_sessions_overlay` clears both flags, so the exclusion
+is enforced where the state changes rather than in the renderer. The trend graph and the
+help are the two non-modal popups, so the keys behind either keep working and `Esc`, through
+`close_popups`, takes whichever is up down before it moves on to clearing the status line.
 
 ### The adaptive header
 

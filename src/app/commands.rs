@@ -4,10 +4,14 @@
 //! Every handler here mutates [`App`] exactly as the key handlers do, and funnels its writes
 //! through `save_now`. The timer state machine stays in [`super`].
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::repair;
 use super::{App, InputMode};
+use crate::cstimer;
 use crate::storage;
 use crate::types::{Penalty, Puzzle, Session};
 
@@ -74,8 +78,11 @@ impl App {
             "dnf" => self.cmd_set_penalty(Penalty::Dnf),
             "+2" => self.cmd_set_penalty(Penalty::Plus2),
             "ok" => self.cmd_set_penalty(Penalty::None),
+            "export" => self.cmd_export(rest),
+            "import" => self.cmd_import(rest),
             "inspect" => self.cmd_toggle_inspection(),
             "hidetime" => self.cmd_toggle_hide_time(),
+            "trend" => self.toggle_trend(),
             "help" => self.toggle_help(),
             "quit" | "q" => self.should_quit = true,
             _ => self.status(format!("unknown command: {}", cmd)),
@@ -191,8 +198,16 @@ impl App {
         self.save_now();
     }
 
-    /// Delete a whole session and its solves. No argument means the one you are in.
+    /// Delete a whole session and its solves. No argument means the one you are in, and
+    /// `<from>-<to>` means every user session in that inclusive range.
     fn cmd_delete_session(&mut self, rest: &str) {
+        // A leading '-' is a malformed id rather than a range with no lower bound.
+        if let Some((from, to)) = rest.trim().split_once('-') {
+            if !from.is_empty() {
+                self.cmd_delete_session_range(from, to);
+                return;
+            }
+        }
         let id = if rest.is_empty() {
             self.save.active_session_id
         } else {
@@ -220,6 +235,47 @@ impl App {
         }
         self.refresh_derived();
         self.status(format!("deleted session: {} (#{})", removed.name, removed.id));
+        self.save_now();
+    }
+
+    /// Delete every user session in an inclusive id range, in one pass and one save.
+    ///
+    /// Nothing in the range has to exist and nothing in it has to be deletable: a default
+    /// session is refused and a free id is skipped, both counted rather than reported one by
+    /// one, so `/delsession 1-1000` is a way to clear the user sessions rather than an error.
+    fn cmd_delete_session_range(&mut self, from: &str, to: &str) {
+        let (Ok(from), Ok(to)) = (from.trim().parse::<u64>(), to.trim().parse::<u64>()) else {
+            self.status("usage: /delsession <id> or /delsession <from>-<to>");
+            return;
+        };
+        if from > to {
+            self.status(format!("not a session range: {}-{}", from, to));
+            return;
+        }
+
+        // The fallback puzzle has to be read before the session holding it can be removed.
+        let doomed = self.save.active_session_id;
+        let fallback = self.puzzle().default_session_id();
+        let before = self.save.sessions.len();
+        self.save
+            .sessions
+            .retain(|s| s.is_default() || !(from..=to).contains(&s.id));
+        let deleted = before - self.save.sessions.len();
+        // Every id in the range that is still standing was a default or was never taken.
+        let skipped = (to - from + 1).saturating_sub(deleted as u64);
+
+        if !self.save.sessions.iter().any(|s| s.id == doomed) {
+            self.save.active_session_id = fallback;
+            self.new_scramble();
+        }
+        self.refresh_derived();
+        let plural = if deleted == 1 { "" } else { "s" };
+        let msg = if skipped == 0 {
+            format!("deleted {} session{}", deleted, plural)
+        } else {
+            format!("deleted {} session{} ({} skipped)", deleted, plural, skipped)
+        };
+        self.status(msg);
         self.save_now();
     }
 
@@ -254,6 +310,68 @@ impl App {
         self.solve_detail = None;
         self.refresh_derived();
         let msg = format!("deleted {}", crate::types::format_solve(&removed));
+        self.status(msg);
+        self.save_now();
+    }
+
+    /// Write every session out as a csTimer export. Nothing about the save file changes.
+    fn cmd_export(&mut self, rest: &str) {
+        let path = if rest.is_empty() {
+            PathBuf::from(cstimer::default_file_name(storage::now_millis()))
+        } else {
+            PathBuf::from(rest)
+        };
+        let text = cstimer::export(&self.save);
+        match fs::write(&path, text) {
+            Ok(()) => {
+                let shown = shown_path(&path);
+                self.status(format!("exported to {}", shown.display()));
+            }
+            Err(e) => self.status(format!("export failed: {}", e)),
+        }
+    }
+
+    /// Adopt a csTimer export. Every session in it arrives as a new one: an import never
+    /// merges into a session that already exists, and it never moves you out of the one you
+    /// are in.
+    fn cmd_import(&mut self, rest: &str) {
+        if rest.is_empty() {
+            self.status("usage: /import <path>");
+            return;
+        }
+        let text = match fs::read_to_string(rest) {
+            Ok(text) => text,
+            Err(e) => {
+                self.status(format!("import failed: {}", e));
+                return;
+            }
+        };
+        let imported = match cstimer::import(&text) {
+            Ok(imported) => imported,
+            Err(e) => {
+                self.status(format!("import failed: {}", e));
+                return;
+            }
+        };
+
+        let count = imported.sessions.len();
+        for session in imported.sessions {
+            let id = self.push_session(session.name, session.puzzle);
+            if let Some(target) = self.save.sessions.iter_mut().find(|s| s.id == id) {
+                target.solves = session.solves;
+            }
+        }
+
+        self.refresh_derived();
+        let plural = if count == 1 { "" } else { "s" };
+        let msg = if imported.skipped == 0 {
+            format!("imported {} session{}", count, plural)
+        } else {
+            format!(
+                "imported {} session{} ({} skipped)",
+                count, plural, imported.skipped
+            )
+        };
         self.status(msg);
         self.save_now();
     }
@@ -296,6 +414,17 @@ impl App {
             }
             None => self.status("no solves yet"),
         }
+    }
+}
+
+/// The path to name on the status line: a relative one is where the app was started from.
+fn shown_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -689,6 +818,129 @@ mod tests {
         assert_eq!(loaded.active_session_id, Puzzle::Cube5.default_session_id());
     }
 
+    /// Create `n` user sessions, returning their ids in order. The active session is the last.
+    fn user_sessions(app: &mut App, n: usize) -> Vec<u64> {
+        (0..n)
+            .map(|i| {
+                run_command(app, &format!("new s{}", i));
+                app.current_session().id
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delsession_takes_a_range_and_counts_what_it_could_not_take() {
+        let (mut app, _g) = test_app("cmd-delsession-range");
+        let ids = user_sessions(&mut app, 4);
+        run_command(&mut app, "session 1");
+        let first = ids[0];
+        let last = ids[3];
+        // One free id past the last session, and the default 12 below the first.
+        run_command(&mut app, &format!("delsession 12-{}", last + 1));
+
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("deleted 4 sessions (2 skipped)"),
+            "the default and the free id are counted, not reported one by one"
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert!(
+            app.save.sessions.iter().all(|s| s.is_default()),
+            "every user session in the range is gone"
+        );
+        assert_eq!(app.save.active_session_id, 1, "you were not in the range");
+
+        let loaded = storage::load(&app.data_path).expect("one save at the end");
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert!(!loaded.sessions.iter().any(|s| s.id == first));
+    }
+
+    #[test]
+    fn a_range_delete_keeps_the_sessions_outside_it() {
+        let (mut app, _g) = test_app("cmd-delsession-range-edges");
+        let ids = user_sessions(&mut app, 5);
+        run_command(&mut app, "session 1");
+
+        run_command(&mut app, &format!("delsession {}-{}", ids[1], ids[3]));
+
+        assert_eq!(app.status_msg.as_deref(), Some("deleted 3 sessions"));
+        let left: Vec<u64> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| !s.is_default())
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(left, vec![ids[0], ids[4]], "the bounds are inclusive");
+    }
+
+    #[test]
+    fn a_range_that_takes_the_active_session_lands_on_its_puzzle_default() {
+        let (mut app, _g) = test_app("cmd-delsession-range-active");
+        run_command(&mut app, "5x5");
+        let ids = user_sessions(&mut app, 3);
+        add_solve(&mut app, 60_000);
+        let before = app.scramble.clone();
+        assert_eq!(app.save.active_session_id, ids[2], "in the last of the three");
+
+        run_command(&mut app, &format!("delsession {}-{}", ids[0], ids[2]));
+
+        assert_eq!(app.status_msg.as_deref(), Some("deleted 3 sessions"));
+        assert_eq!(
+            app.save.active_session_id,
+            Puzzle::Cube5.default_session_id(),
+            "several died together and the active one was among them"
+        );
+        assert_eq!(app.current_session().puzzle, Puzzle::Cube5);
+        assert!(app.current_session().solves.is_empty());
+        assert_ne!(app.scramble, before, "landing somewhere else re-scrambles");
+
+        let loaded = storage::load(&app.data_path).expect("the fallback persists");
+        assert_eq!(loaded.active_session_id, Puzzle::Cube5.default_session_id());
+    }
+
+    #[test]
+    fn a_range_of_nothing_but_defaults_deletes_nothing() {
+        let (mut app, _g) = test_app("cmd-delsession-range-defaults");
+        run_command(&mut app, "delsession 1-12");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("deleted 0 sessions (12 skipped)")
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(app.save.active_session_id, 1, "and moves you nowhere");
+    }
+
+    #[test]
+    fn a_backwards_or_malformed_range_is_a_usage_error() {
+        let (mut app, _g) = test_app("cmd-delsession-range-bad");
+        let ids = user_sessions(&mut app, 2);
+
+        run_command(&mut app, &format!("delsession {}-{}", ids[1], ids[0]));
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some(format!("not a session range: {}-{}", ids[1], ids[0]).as_str())
+        );
+
+        for line in ["delsession 13-", "delsession 13-x", "delsession 13-14-15"] {
+            run_command(&mut app, line);
+            assert_eq!(
+                app.status_msg.as_deref(),
+                Some("usage: /delsession <id> or /delsession <from>-<to>"),
+                "/{line}"
+            );
+        }
+        // A negative number is still a malformed id rather than half a range.
+        run_command(&mut app, "delsession -1");
+        assert_eq!(app.status_msg.as_deref(), Some("not a session id: -1"));
+
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len() + 2,
+            "nothing refused deletes anything"
+        );
+    }
+
     #[test]
     fn new_creates_a_session_for_the_current_puzzle() {
         let (mut app, _g) = test_app("cmd-new");
@@ -785,6 +1037,49 @@ mod tests {
         run_command(&mut app, "help");
         assert!(!app.show_help);
         assert_eq!(app.sessions_overlay, None);
+    }
+
+    #[test]
+    fn trend_toggles_the_graph_the_way_help_toggles_the_help() {
+        let (mut app, _g) = test_app("cmd-trend");
+        assert!(!app.show_trend, "it starts closed");
+
+        run_command(&mut app, "trend");
+        assert!(app.show_trend, "/trend opens the graph");
+        assert!(app.status_msg.is_none(), "opening a popup says nothing else");
+
+        run_command(&mut app, "trend");
+        assert!(!app.show_trend, "and the same command closes it");
+
+        // Nothing about it depends on there being solves to plot.
+        run_command(&mut app, "TREND");
+        assert!(app.show_trend, "the parser lowercases the command");
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_trend, "esc closes it like it closes the help");
+    }
+
+    #[test]
+    fn the_trend_help_and_sessions_overlays_are_all_alternatives() {
+        let (mut app, _g) = test_app("cmd-trend-exclusive");
+        run_command(&mut app, "help");
+        run_command(&mut app, "trend");
+        assert!(app.show_trend, "/trend opens the graph");
+        assert!(!app.show_help, "and closes the help");
+
+        run_command(&mut app, "help");
+        assert!(app.show_help, "/help opens the help");
+        assert!(!app.show_trend, "and closes the graph");
+
+        run_command(&mut app, "trend");
+        run_command(&mut app, "sessions");
+        assert!(app.sessions_overlay.is_some(), "/sessions opens the listing");
+        assert!(!app.show_trend, "and closes the graph");
+
+        // The listing is modal, so it is closed before the graph can come back.
+        app.on_key(press(KeyCode::Esc));
+        run_command(&mut app, "trend");
+        assert!(app.show_trend);
+        assert_eq!(app.sessions_overlay, None, "and the listing stays closed");
     }
 
     #[test]
@@ -1041,5 +1336,257 @@ mod tests {
         assert!(app.save.settings.inspection);
         run_command(&mut app, "2X2");
         assert_eq!(app.current_session().puzzle, Puzzle::Cube2);
+    }
+
+    // ---- csTimer interchange
+
+    /// A csTimer file written by hand rather than by our own exporter: two sessions, one of
+    /// them an event Cubetimer does not have.
+    fn sample_export() -> String {
+        let session_data = serde_json::json!({
+            "1": { "name": "weekend", "opt": { "scrType": "222so" }, "rank": 1 },
+            "2": { "name": "blind", "opt": { "scrType": "333ni" }, "rank": 2 }
+        })
+        .to_string();
+        serde_json::json!({
+            "session1": [
+                [[0, 3_000], "R U", "", 1_700_000_000],
+                [[2000, 4_000], "F R", "", 1_700_000_060]
+            ],
+            "session2": [[[0, 60_000], "R U", "", 1_700_000_120]],
+            "properties": { "sessionN": 2, "sessionData": session_data }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn export_writes_a_file_import_can_read_and_touches_nothing() {
+        let (mut app, _g) = test_app("cmd-export");
+        add_solve(&mut app, 12_340);
+        let out = TempPath::new("cmd-export-out");
+        let before = app.save.sessions.len();
+
+        run_command(&mut app, &format!("export {}", out.path.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("exported to "), "{status}");
+        assert!(
+            status.contains(&out.path.display().to_string()),
+            "the status names the file: {status}"
+        );
+        assert_eq!(app.save.sessions.len(), before, "export creates no session");
+        assert_eq!(app.current_session().solves.len(), 1, "and deletes nothing");
+
+        let text = fs::read_to_string(&out.path).expect("the file is there");
+        let back = cstimer::import(&text).expect("our own export parses");
+        assert_eq!(back.skipped, 0);
+        assert_eq!(back.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(back.sessions[0].solves.len(), 1);
+        assert_eq!(back.sessions[0].solves[0].millis, 12_340);
+    }
+
+    #[test]
+    fn export_with_no_path_writes_the_default_name_and_reports_it_in_full() {
+        let (mut app, _g) = test_app("cmd-export-default");
+        add_solve(&mut app, 9_000);
+
+        run_command(&mut app, "export");
+
+        // The name carries the clock, so the file to clean up is the one the status names.
+        let status = app.status_msg.clone().expect("a status line");
+        let written = status
+            .strip_prefix("exported to ")
+            .expect("the status names the file");
+        let path = PathBuf::from(written);
+        let text = fs::read_to_string(&path);
+        let _ = fs::remove_file(&path);
+
+        assert!(path.is_absolute(), "a relative path is reported in full");
+        assert_eq!(
+            path.parent(),
+            std::env::current_dir().ok().as_deref(),
+            "the default lands in the working directory"
+        );
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("a file name");
+        // csTimer's own naming, `cstimer_YYYYMMDD_HHMMSS.txt`. The clock moves between the
+        // export and this line, so the shape is what can be asserted, not the digits.
+        let stamp = name
+            .strip_prefix("cstimer_")
+            .and_then(|n| n.strip_suffix(".txt"))
+            .unwrap_or_else(|| panic!("not a csTimer export name: {name}"));
+        let (date, time) = stamp.split_once('_').expect("a date and a time");
+        assert!(
+            date.len() == 8 && date.chars().all(|c| c.is_ascii_digit()),
+            "{name}"
+        );
+        assert!(
+            time.len() == 6 && time.chars().all(|c| c.is_ascii_digit()),
+            "{name}"
+        );
+
+        let text = text.expect("the file is where the status said it was");
+        assert!(cstimer::import(&text).is_ok(), "and holds an export");
+    }
+
+    #[test]
+    fn export_reports_an_io_error_rather_than_failing() {
+        let (mut app, _g) = test_app("cmd-export-bad");
+        // A directory that does not exist: `fs::write` does not create parents.
+        let missing = std::env::temp_dir()
+            .join("cubetimer-no-such-dir")
+            .join("out.json");
+
+        run_command(&mut app, &format!("export {}", missing.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("export failed: "), "{status}");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn import_adopts_every_session_it_understands_as_a_new_one() {
+        let (mut app, _g) = test_app("cmd-import");
+        add_solve(&mut app, 11_000);
+        let active = app.save.active_session_id;
+        let scramble = app.scramble.clone();
+        let file = TempPath::new("cmd-import-src");
+        fs::write(&file.path, sample_export()).expect("fixture written");
+
+        run_command(&mut app, &format!("import {}", file.path.display()));
+
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("imported 1 session (1 skipped)"),
+            "3x3 bld is not one of our events"
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+
+        let adopted = app.save.sessions.last().expect("the imported session");
+        assert!(
+            adopted.id >= FIRST_USER_ID,
+            "an import lands in the user id space, got {}",
+            adopted.id
+        );
+        assert_eq!(adopted.name, "weekend");
+        assert_eq!(adopted.puzzle, Puzzle::Cube2);
+        assert_eq!(adopted.solves.len(), 2);
+        assert_eq!(adopted.solves[0].millis, 3_000);
+        assert_eq!(adopted.solves[1].penalty, Penalty::Plus2);
+        assert_eq!(adopted.solves[1].millis, 4_000, "the +2 is not folded in");
+        assert_eq!(adopted.solves[1].timestamp, 1_700_000_060_000);
+
+        assert_eq!(app.save.active_session_id, active, "you stay where you were");
+        assert_eq!(app.scramble, scramble, "and keep the scramble on screen");
+        assert_eq!(app.current_session().solves.len(), 1);
+
+        let loaded = storage::load(&app.data_path).expect("the import persists");
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+        assert_eq!(loaded.active_session_id, active);
+        let id = adopted.id;
+        assert!(loaded.sessions.iter().any(|s| s.id == id));
+        assert!(
+            loaded.next_session_id > id,
+            "the id counter moved past the adopted session"
+        );
+    }
+
+    #[test]
+    fn an_import_never_merges_into_a_session_that_already_exists() {
+        let (mut app, _g) = test_app("cmd-import-twice");
+        let file = TempPath::new("cmd-import-twice-src");
+        fs::write(&file.path, sample_export()).expect("fixture written");
+        let line = format!("import {}", file.path.display());
+
+        run_command(&mut app, &line);
+        run_command(&mut app, &line);
+
+        let weekends: Vec<&Session> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.name == "weekend")
+            .collect();
+        assert_eq!(weekends.len(), 2, "the same file twice is two sessions");
+        assert_ne!(weekends[0].id, weekends[1].id);
+        for session in weekends {
+            assert_eq!(session.solves.len(), 2, "neither one gained the other's solves");
+        }
+    }
+
+    #[test]
+    fn an_export_of_our_own_imports_back_with_every_session() {
+        let (mut app, _g) = test_app("cmd-roundtrip");
+        add_solve(&mut app, 12_340);
+        run_command(&mut app, "new evening");
+        add_solve(&mut app, 9_870);
+        let out = TempPath::new("cmd-roundtrip-out");
+
+        run_command(&mut app, &format!("export {}", out.path.display()));
+        run_command(&mut app, &format!("import {}", out.path.display()));
+
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("imported 13 sessions"),
+            "twelve defaults and the one user session, none skipped"
+        );
+        assert_eq!(
+            app.save.sessions.len(),
+            (Puzzle::DEFAULT_ORDER.len() + 1) * 2
+        );
+        let copies: Vec<&Session> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.name == "default 3x3")
+            .collect();
+        assert_eq!(copies.len(), 1, "a default comes back named after its event");
+        assert_eq!(copies[0].puzzle, Puzzle::Cube3);
+        assert_eq!(copies[0].solves.len(), 1);
+        assert_eq!(copies[0].solves[0].millis, 12_340);
+        assert_eq!(copies[0].solves[0].scramble, "R U R' U'");
+    }
+
+    #[test]
+    fn import_of_a_file_that_is_not_an_export_is_harmless() {
+        let (mut app, _g) = test_app("cmd-import-garbage");
+        let file = TempPath::new("cmd-import-garbage-src");
+        fs::write(&file.path, "this is not JSON at all").expect("fixture written");
+
+        run_command(&mut app, &format!("import {}", file.path.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(
+            status.starts_with("import failed: not a csTimer export"),
+            "{status}"
+        );
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len(),
+            "a refused import creates nothing"
+        );
+    }
+
+    #[test]
+    fn import_reports_a_missing_file_and_needs_a_path() {
+        let (mut app, _g) = test_app("cmd-import-missing");
+        run_command(&mut app, "import");
+        assert_eq!(app.status_msg.as_deref(), Some("usage: /import <path>"));
+
+        let missing = std::env::temp_dir().join("cubetimer-no-such-file.json");
+        run_command(&mut app, &format!("import {}", missing.display()));
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("import failed: "), "{status}");
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+    }
+
+    #[test]
+    fn shown_path_answers_with_something_the_user_can_find() {
+        let cwd = std::env::current_dir().expect("a working directory");
+        assert_eq!(shown_path(Path::new("out.json")), cwd.join("out.json"));
+        let absolute = std::env::temp_dir().join("out.json");
+        assert_eq!(shown_path(&absolute), absolute, "an absolute path is kept");
     }
 }

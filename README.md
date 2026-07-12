@@ -152,10 +152,14 @@ spaces do not matter.
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
 | `/delsession [id]` | delete a session and its solves, current one by default |
+| `/delsession <from>-<to>` | delete every session in that id range, defaults refused |
 | `/dnf` `/+2` `/ok` | set or clear the penalty on your last solve |
 | `/del [n]` | delete solve number `n`, or your newest solve if you leave `n` off |
 | `/inspect` | turn 15 second inspection on or off |
 | `/hidetime` | hide or show the running time while you solve |
+| `/export [path]` | write every session out as a csTimer file |
+| `/import <path>` | read a csTimer file in as new sessions |
+| `/trend` | open and close the graph of your last 50 solves |
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
@@ -227,6 +231,14 @@ takes the one you are in, and with an id it takes that one, so you can clear out
 a session without switching to it first. Deleting the session you are in leaves
 you on the default for its puzzle. The twelve defaults are refused.
 
+A range takes several at once: `/delsession 15-20` deletes every session from id
+15 through id 20, both ends included. Ids in the range that belong to one of the
+twelve defaults are refused and ids nothing sits on are passed over, both counted
+rather than named, so the status reads `deleted 4 sessions (2 skipped)` and
+`/delsession 13-9999` is a way to clear out every session you ever made. If the
+one you are in goes with them you land on the default for its puzzle, exactly as
+deleting it on its own would. A backwards range like `20-15` is refused.
+
 ## Where your times live
 
 Every solve is saved the moment you stop the timer, and so is every command that
@@ -247,6 +259,43 @@ somewhere else.
 
 If that file ever does turn up unreadable, Cubetimer refuses to start and tells
 you the path rather than starting fresh over the top of it.
+
+## Taking your times with you
+
+Cubetimer reads and writes csTimer's export format, so your history is not
+trapped in either program. `/export` writes every session, solves, scrambles,
+penalties and timestamps included, to a file named the way csTimer names its
+own, `cstimer_20260802_141534.txt` for an export taken at that moment, in the
+directory you started Cubetimer from. The date and time in the name are UTC. The
+status line tells you the full path it landed at. Give it an argument, as in
+`/export C:\backups\times.txt`, and it writes there instead. Nothing about your
+save file changes, so exporting is also the quickest way to take a backup.
+
+Keep the `.txt` ending on any name you choose. csTimer's import button opens a
+file picker that only offers text files, and Windows calls a `.json` file
+something else, so a `.json` export is one the picker will not show you.
+
+What comes out is the shape csTimer's own importer reads: hand it to the
+from-file import in csTimer's export panel and every session, every name and
+every solve arrives. Reading it back into Cubetimer returns every solve as it
+was, give or take the fraction of a second in a timestamp that csTimer counts in
+whole seconds. One thing to know before you import into csTimer: it replaces all
+of its own settings with whatever the file carries, and a Cubetimer export
+carries session data and nothing else, so csTimer's preferences go back to their
+defaults.
+
+`/import <path>` goes the other way and reads a file csTimer exported. Every
+session in it arrives as a **new** session of your own with the next free id,
+keeping the name csTimer had for it. An import never merges into a session that
+already exists, never touches a solve you already had, and never moves you out
+of the session you are in, so the worst an unwanted import can do is leave you
+some sessions to `/delsession`. The status line counts what came in.
+
+The twelve events line up in both directions, one-handed included. Events
+csTimer has and Cubetimer does not, blindfolded and fewest moves among them, are
+skipped rather than filed under the nearest match, because 3x3 blindfolded times
+in a 3x3 average would be nonsense. The status line says how many were passed
+over, as in `imported 4 sessions (2 skipped)`.
 
 ## How the stats work
 
@@ -280,6 +329,37 @@ currently on, and the rolling windows behind them are searched within each
 session rather than across the seam between two of them. On a narrow terminal a
 row drops entries from the right rather than wrapping, so the numbers you look at
 most stay put.
+
+`/trend` graphs your last fifty solves in a popup, as a line with time up the
+side and the solve's place in the window along the bottom, so a dip is a fast
+solve and a climb is a session going the wrong way. The y axis is labelled with
+three times, the x axis with the first and last solve numbers, and `Esc` or
+`/trend` again closes it. It shares its slot with the help and the session
+picker, so opening one closes the other, and a solve detail popup covers all
+three.
+
+The time axis spans the window itself rather than counting up from zero, because
+solve times cluster in a band far away from zero and starting there would draw
+every session as one flat line across the top. It also stops at the window's
+95th percentile rather than its slowest solve: a single sixty second disaster
+among twelve second solves would otherwise own the whole scale and squash
+everything else onto the bottom row, so the disaster is drawn pinned to the top
+edge instead and the rest of the window keeps the height. That means the top
+label is a ceiling, not always your slowest time. A window with nothing to
+separate draws flat across the middle. DNFs have no time to plot and are simply
+absent, so a session with a run of them graphs fewer than fifty points.
+
+The graph is drawn out of `▀`, `▄` and `█` and nothing else, all of them
+characters the classic Windows console fonts carry, so it renders as a line
+rather than a row of empty boxes there. On a terminal too small to read it,
+under 44 columns or 16 rows, `/trend` draws nothing at all.
+
+Beating a personal best says so. When a solve is faster than your best ever
+single, or its ao5 beats your best ever ao5, a green `new pb` line appears over
+the digits for five seconds and the result underneath turns green with it. Both
+at once are named on the same line. Only a record you actually beat counts:
+matching one exactly is not beating it, and the first single or ao5 you ever
+record had nothing to beat, so it passes quietly.
 
 ## Scrambles
 
