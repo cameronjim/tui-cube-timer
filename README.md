@@ -36,7 +36,15 @@ cargo build --release
 ```
 
 The finished program lands at `target\release\cubetimer.exe`, and you can run it
-from there or drop that one file anywhere on your PATH.
+from there using:
+```
+target\release\cubetimer.exe
+```
+or drop that one file anywhere on your PATH and run using:
+from there using:
+```
+cubetimer
+```
 [docs/getting-started.md](docs/getting-started.md) walks the same route from a
 bare machine: installing Rust, choosing a toolchain flavour, and what cargo
 fetches on that first build.
