@@ -39,7 +39,10 @@ cargo build --release
 
 The first build takes a few minutes: cargo downloads the libraries Cubetimer
 uses and compiles everything, once. Builds after that take seconds. The
-finished program lands at `target\release\cubetimer.exe`; run it from there,
+finished program lands at `target\release\cubetimer.exe`; run it from there using:
+```
+target\release\cubetimer.exe
+```
 or drop that one file anywhere on your PATH and just type `cubetimer`. During
 development, `cargo run --release` builds and runs in one step.
 
