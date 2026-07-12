@@ -53,24 +53,26 @@ notation in common:
 `src/ui/` splits the same way, along the line between drawing and arithmetic. `mod.rs`
 holds `draw`, the header, the stats strip, the times list and the status line; `timer.rs`
 holds the big countdown in the middle of the frame and the block font it is drawn in;
-`overlay.rs` holds the three popups, the help reference, the session picker and one solve in
-full, which are the only things drawn over the frame rather than into it; `layout.rs` holds
+`overlay.rs` holds the four popups, the help reference, the session picker, the trend graph
+and one solve in full, which are the only things drawn over the frame rather than into it;
+`layout.rs` holds
 the pure geometry, meaning panel heights, word wrapping, popup placement, the visible slice
 of a scrolling list and `inner_of`. Nothing in `layout.rs` sees a `Frame` or an `App`, which
 is what makes the degradation rules testable as ordinary functions rather than by eye.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 465 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 380 |
 | `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
-| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 240 |
-| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 268 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_detail`, `trend_plot` | 391 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 280 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
 the single `pub(super) fn on_command_key` and never touched from outside `app`.
-`selection.rs` is the state that says which solve or session you are pointing at, which the
-timer never reads: the times cursor, the solve-detail overlay and the sessions picker.
+`selection.rs` is the state that says which solve or session you are pointing at and which
+overlay is up, none of which the timer reads: the times cursor, the solve-detail overlay,
+the sessions picker and the two non-modal toggles behind `/help` and `/trend`.
 `progress.rs` answers "how is this session going", which is the trend window and the
 personal-best celebration, neither of which is timer state. `repair.rs` answers "is this
 save file internally consistent", which nothing in the timer flow ever asks, and is a
@@ -80,9 +82,9 @@ they had when `app` was one file.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 497 |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 431 |
-| `selection.rs` | `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 116 |
+| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 493 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 432 |
+| `selection.rs` | `toggle_help`, `toggle_trend`, `close_popups`, `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 150 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
 | `progress.rs` | `trend_of`, `pb_banner_text`, `note_pb`, `clear_pb_banner`, `expire_pb_banner` | 76 |
 | `testkit.rs` | `#[cfg(test)]` scaffolding the other five share: `TempPath`, `test_app`, `press`, `run_command` | 147 |
@@ -144,12 +146,12 @@ pub trend: Vec<u64>,
 pub pb_banner: Option<String>,
 ```
 
-`trend` is what `ui::draw_trend` hands to ratatui's `Sparkline`. `progress::trend_of` takes
-the last `TREND_LEN` of 50 solves of the active session and keeps their
-`effective_millis()`, so a `+2` plots as the time it cost and a DNF, having no time, is
+`trend` is what `ui::overlay::draw_trend` plots, through `trend_plot` into a ratatui `Chart`.
+`progress::trend_of` takes the last `TREND_LEN` of 50 solves of the active session and keeps
+their `effective_millis()`, so a `+2` plots as the time it cost and a DNF, having no time, is
 absent rather than zero. It is refreshed by `refresh_derived` alongside the statistics, on
 exactly the same set of mutations, which is why a penalty change or a session switch moves
-the bars immediately.
+the line immediately, whether the popup is open at the time or not.
 
 `pb_banner` is the celebration line, and `banner_since` beside it is the private `Instant`
 that retires it. `finish_solve` reads `pbs.single` and `pbs.ao5` *before* the new solve
@@ -462,11 +464,12 @@ the scroll keys and `q` all keep working immediately after a solve.
 **Ctrl-C** is checked before both guards and sets `should_quit` unconditionally, since raw
 mode swallows the signal the shell would normally deliver.
 
-### Selection: the times cursor and the two list overlays
+### Selection: the times cursor and the four overlays
 
 Everything in this section lives in `app/selection.rs`. It is reached from keys the timer
 does not want, and it changes no timer state, which is the whole reason it is not in
-`mod.rs`.
+`mod.rs`. That includes `toggle_help`, `toggle_trend` and `close_popups`, the three
+functions behind the two overlays that are flags rather than cursors.
 
 The times list carries a selection rather than a scroll offset. `on_key_idle` hands the
 cursor keys to `on_key_times`, which moves `times_selected` by 1 for the arrows and `j`/`k`,
@@ -499,12 +502,14 @@ if self.sessions_overlay.is_some() {
 }
 ```
 
-The precedence runs **detail > sessions > help**. Detail outranks sessions because you can
-only have opened it on top of the list, so closing gives back the thing underneath rather
-than the whole screen at once. Help is not modal and cannot be open beside the sessions
-picker at all: `toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
-`show_help`, so the exclusion is enforced where the state changes rather than in the
-renderer.
+The precedence runs **detail > sessions > trend > help**. Detail outranks sessions because
+you can only have opened it on top of the list, so closing gives back the thing underneath
+rather than the whole screen at once. Neither the trend graph nor the help is modal, and no
+two of the bottom three can be open at once: `toggle_help` and `toggle_trend` each clear
+the other two, and `open_sessions_overlay` clears both flags, so the exclusion is enforced
+where the state changes rather than in the renderer. `Esc` in `on_key_idle` goes through
+`close_popups`, which takes down whichever of the two flags is up and reports whether there
+was one, so a bare `Esc` still clears the status line when there is no popup to close.
 
 Only three keys do anything inside the detail overlay: `r` calls `recall_scramble`, `Esc`
 and `Enter` close. Because both branches sit below the `Timing` check, a solve running
@@ -563,6 +568,7 @@ produces `unknown command: <verb>` in the status line.
 | `/hidetime` | Toggle masking the running time, persisted |
 | `/export [path]` | Write every session out as a csTimer export, `cstimer_YYYYMMDD_HHMMSS.txt` by default |
 | `/import <path>` | Adopt a csTimer export, every session in it as a new one |
+| `/trend` | Toggle the trend graph overlay |
 | `/help` | Toggle the help overlay |
 | `/quit`, `/q` | Quit |
 
@@ -890,14 +896,10 @@ panic and without a blank screen:
   0 and it is not drawn at all.
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
-- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 7
-  rows once it has at least 14, the extra two being the trend sparkline. `stats_height` is
-  the whole of that decision and `trend_rows` is the conditional half of it: the strip
-  appears at `STATS_H` (5) once `STATS_H + TIMER_MIN_H` fits, and the sparkline adds
-  `TREND_H` (2) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
-  are written against `TIMER_MIN_H`, so the bars can never be the reason the block font is
-  lost, and every terminal too short for them renders exactly what it did before the trend
-  existed. An empty trend claims no rows at all.
+- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0.
+  `stats_height` is the whole of that decision, and its threshold is written against
+  `TIMER_MIN_H`, so the numbers can never be the reason the block font is lost: a column
+  that cannot hold both keeps the big digits.
 
   The three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
   the width of `current`, the longest of the three prefixes) plus a space: `current` over
@@ -919,32 +921,6 @@ panic and without a blank screen:
   wide, every row is down to the one entry `fit_count` will never drop, and
   `best single 9.87` is wide enough that the paragraph clips it, which is the intended
   degradation: a clipped number still says more than a blank row.
-
-  `draw_trend` takes the two rows below and spends the same `STAT_PREFIX_W` plus a space on
-  a dim `trend` label in the first of them, so the bars begin in the column the three rows
-  put their values in. What it plots is `App::trend`, tail-sliced to the width it was given,
-  because a panel too narrow for fifty bars should drop the oldest solves rather than the
-  ones just done. The bars are times, so a dip is a fast solve. A panel with no room for
-  anything past the label draws neither.
-
-  Two details decide what that block looks like. The first is the glyph set. Ratatui's
-  default `NINE_LEVELS` bars are the eighth blocks `▁` through `█`, and the classic Windows
-  console fonts carry none of the partial ones, so on the platform Cubetimer targets first
-  the whole sparkline came out as tofu boxes. `draw_trend` asks for the `THREE_LEVELS` set
-  instead, whose only glyphs are a space, `▄` (U+2584) and `█` (U+2588), both of them CP437
-  characters every console font has. The second is that ratatui fills a bar
-  column from its bottom row upwards, so two rows of a three-level bar stack into exactly
-  four non-empty heights: `▄`, `█`, `▄` over `█`, and `█` over `█`. That is what `TREND_H`
-  is 2 for, and `draw_trend` still clamps the rect it renders into rather than trusting the
-  block to be the height it asked for.
-
-  `trend_bars` therefore hands the widget levels rather than milliseconds, normalized to
-  the window's own minimum and maximum, with `Sparkline::max(TREND_LEVELS)` set so a level
-  maps one to one onto a glyph stack instead of being rescaled again. The formula and the
-  reason for it are in [algorithms.md](algorithms.md); the short version is that solve times
-  cluster far from zero, and scaling from zero drew every bar at the same height. Level 1 is
-  the floor, so no solve leaves a blank column and the bottom row is unbroken across the
-  whole window.
 - **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
@@ -956,6 +932,31 @@ panic and without a blank screen:
 - **State caption**, the dim line under the digits that names what the timer is doing
   (`inspecting`, `keep holding…`, `release to start` and so on), is only appended when at
   least two spare rows remain after the digits.
+- **Trend overlay** is the only popup that grows with the terminal. `trend_popup` takes the
+  area less `TREND_MARGIN` (4) on each axis, caps it at `TREND_W` by `TREND_H` (72 by 22),
+  and returns `None` below `TREND_MIN_W` by `TREND_MIN_H` (40 by 12), which is the smallest
+  frame the axis labels and the hint leave a readable line inside. `draw_trend` keeps the
+  bottom inner row for `esc: close` exactly as the sessions popup does and gives the rest to
+  a ratatui `Chart`, and an empty `App::trend` gets a centered `no solves to plot yet`
+  instead of two empty axes.
+
+  The chart is one `Dataset` with `GraphType::Line` and `Marker::HalfBlock`, drawn in
+  `C_TIMING`. The marker is the load-bearing choice. Ratatui's default is braille, and the
+  sparkline this replaced used the eighth blocks `▁` through `█`; the classic Windows
+  console fonts carry neither, so on the platform Cubetimer targets first the whole graph
+  came out as tofu boxes. `HalfBlockGrid` emits `▀` (U+2580), `▄` (U+2584) and `█` (U+2588)
+  and nothing else, and the axes ratatui draws are `─`, `│` and `└`, so every glyph in the
+  popup is CP437 and every console font has it. Half blocks also double the vertical
+  resolution, which is what makes 20 rows of graph worth 40 steps of time.
+
+  Both axes are labelled, in `dim()`. The y axis carries three ticks from `trend_ticks`,
+  bottom to top, which is the order ratatui stacks them: the window minimum, the midpoint,
+  and the ceiling, each through `types::format_millis`. The top tick is a ceiling and not
+  necessarily your slowest solve, because `trend_plot` pins it to the window's 95th
+  percentile and clamps everything above onto it; the reasoning is in
+  [algorithms.md](algorithms.md). The x axis carries the first and last solve numbers of
+  the window. The whole window is plotted whatever the width, since a line survives two
+  solves sharing a column and dropping the oldest would make the x axis lie.
 - **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 30
   text rows inside its border, placed by `centered()`, which clamps both to the available
   area. It is skipped entirely below 4 by 4. The height follows the content rather than
@@ -983,12 +984,13 @@ panic and without a blank screen:
   `draw_detail` returns early below 4 by 4.
 
 `draw` picks one popup and only one, in the same order `on_key` does: detail, then sessions,
-then help. The detail popup wins because it is the one the user just asked for and the only
-thing that can be opened on top of the list. Help and sessions cannot both be open in the
-first place: `App::toggle_help` clears `sessions_overlay` and `open_sessions_overlay` clears
-`show_help`, so the exclusion is enforced where the state changes rather than in the
-renderer. Help is the only non-modal popup of the three, so the keys behind it keep working
-and `Esc` closes it before it moves on to clearing the status line.
+then trend, then help. The detail popup wins because it is the one the user just asked for
+and the only thing that can be opened on top of the list. No two of the other three can be
+open in the first place: `App::toggle_help` and `App::toggle_trend` each clear the other
+flag and `sessions_overlay`, and `open_sessions_overlay` clears both flags, so the exclusion
+is enforced where the state changes rather than in the renderer. The trend graph and the
+help are the two non-modal popups, so the keys behind either keep working and `Esc`, through
+`close_popups`, takes whichever is up down before it moves on to clearing the status line.
 
 ### The adaptive header
 

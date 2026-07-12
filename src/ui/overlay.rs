@@ -1,24 +1,27 @@
-//! The three popups drawn over the frame: the key and command reference, the session picker,
-//! and one solve in full.
+//! The four popups drawn over the frame: the key and command reference, the session picker,
+//! the trend graph, and one solve in full.
 //!
 //! All are read-only over [`App`] like the rest of [`ui`](super), and all clamp themselves
 //! to the terminal instead of assuming there is room.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Axis, Block, BorderType, Borders, Chart, Clear, Dataset, GraphType, Paragraph, Wrap,
+};
 use ratatui::Frame;
 
 use super::layout::{
-    centered, detail_popup, list_window, puzzle_help_rows, sessions_popup, HELP_KEY_W, HELP_W,
-    SESSIONS_NAME_W,
+    centered, detail_popup, inner_of, list_window, puzzle_help_rows, sessions_popup, trend_popup,
+    HELP_KEY_W, HELP_W, SESSIONS_NAME_W,
 };
 use super::{dim, C_ACCENT, C_IDLE, C_INSPECT, C_TIMING, C_WORST};
 use crate::app::App;
-use crate::types::{format_solve, format_timestamp, Penalty, Puzzle};
+use crate::types::{format_millis, format_solve, format_timestamp, Penalty, Puzzle};
 
-/// The border both popups share, titled and accented so they read as one layer.
+/// The border every popup shares, titled and accented so they read as one layer.
 fn popup_block(title: String) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -82,6 +85,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("/hidetime", "toggle hiding the time while solving"),
         help_row("/export [path]", "write your times as a csTimer .txt file"),
         help_row("/import <path>", "bring csTimer sessions in as new sessions"),
+        help_row("/trend", "graph the last 50 solves"),
         help_row("/help", "toggle this help"),
         help_row("/quit  /q", "quit"),
         Line::from(""),
@@ -184,6 +188,152 @@ pub(super) fn draw_sessions(frame: &mut Frame, app: &App, cursor: usize, area: R
     frame.render_widget(p, popup);
 }
 
+// ---------------------------------------------------------- trend overlay
+
+/// Percentile of the window the top of the y axis is pinned to, as a percentage.
+const TREND_PERCENTILE: usize = 95;
+/// Shortest window whose slowest solve may be left outside the y axis.
+///
+/// Under this there are too few solves to call any of them an outlier, so the axis tops out at
+/// the window maximum. At or above it the slowest is always clipped, which costs the single
+/// distinction between it and the next slowest and buys the whole of the range below.
+const TREND_TRIM_MIN: usize = 5;
+/// Half the y range a window with nothing to separate is drawn against, so its line sits mid height.
+const TREND_FLAT_PAD: f64 = 1.0;
+
+/// One trend graph: the points to plot and the axis bounds they are plotted against.
+#[derive(Debug, PartialEq)]
+struct TrendPlot {
+    points: Vec<(f64, f64)>,
+    x_bounds: [f64; 2],
+    y_bounds: [f64; 2],
+}
+
+/// The top of the y axis: the [`TREND_PERCENTILE`] of `sorted` by nearest rank.
+///
+/// `sorted` is ascending and non-empty. Nearest rank alone is the window maximum until twenty
+/// entries, which is the length at which one wrecked solve does the most damage, so from
+/// [`TREND_TRIM_MIN`] the rank is also held below the last entry.
+fn trend_top(sorted: &[u64]) -> u64 {
+    let n = sorted.len();
+    let mut rank = (n * TREND_PERCENTILE).div_ceil(100).max(1);
+    if n >= TREND_TRIM_MIN {
+        rank = rank.min(n - 1);
+    }
+    sorted[rank - 1]
+}
+
+/// The window as a line: x is a solve's place in it, y is the time that solve cost.
+///
+/// Solve times cluster in a band far away from zero, so the axis spans the window's own range
+/// rather than starting at zero, which draws every session as one flat line near the top. The
+/// ceiling is [`trend_top`] rather than the window maximum, and anything above it is clamped
+/// onto it, so a single 60 second solve among twelve second ones pins to the top edge instead
+/// of crushing every other point onto the bottom row. A window with nothing to separate draws
+/// flat at mid height, and a lone solve is the flat line it is rather than a dot in the corner.
+fn trend_plot(window: &[u64]) -> TrendPlot {
+    let mut sorted: Vec<u64> = window.to_vec();
+    sorted.sort_unstable();
+    let (min, top) = match sorted.first() {
+        Some(min) => (*min, trend_top(&sorted)),
+        None => (0, 0),
+    };
+
+    let mut points: Vec<(f64, f64)> = window
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (i as f64, (*v).min(top) as f64))
+        .collect();
+    if points.len() == 1 {
+        points.push((1.0, points[0].1));
+    }
+
+    let (lo, hi) = if top > min {
+        (min as f64, top as f64)
+    } else {
+        (min as f64 - TREND_FLAT_PAD, min as f64 + TREND_FLAT_PAD)
+    };
+    let right = points.len().saturating_sub(1).max(1) as f64;
+    TrendPlot {
+        points,
+        x_bounds: [0.0, right],
+        y_bounds: [lo, hi],
+    }
+}
+
+/// The three y ticks, bottom first, which is the order ratatui stacks them in.
+fn trend_ticks(bounds: [f64; 2]) -> Vec<Line<'static>> {
+    let mid = (bounds[0] + bounds[1]) / 2.0;
+    [bounds[0], mid, bounds[1]]
+        .into_iter()
+        .map(|v| Line::styled(format_millis(v.max(0.0) as u64), dim()))
+        .collect()
+}
+
+/// The last fifty solves of the session as a line graph, time up the side, solve number along.
+///
+/// The whole window is plotted whatever the popup's width, because a line stays a line when two
+/// solves share a column, and dropping the oldest to avoid that would make the axis lie. The
+/// marker is `HalfBlock`, whose only glyphs are `▀`, `▄` and `█`: ratatui's default braille dots
+/// and the eighth blocks the trend was drawn with before are both missing from the classic
+/// Windows console fonts and render as tofu, while all three of these are CP437 characters every
+/// console font has. The axis lines are `─`, `│` and `└`, which are CP437 as well.
+pub(super) fn draw_trend(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(popup) = trend_popup(area) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(popup_block(" trend ".to_string()), popup);
+
+    let inner = inner_of(popup);
+    if inner.width == 0 || inner.height < 2 {
+        return;
+    }
+    // The hint keeps the bottom row, as it does in the other popups that carry one.
+    let graph = Rect {
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    let hint = Rect {
+        y: inner.y.saturating_add(graph.height),
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(Line::styled("  esc: close", dim())), hint);
+
+    if app.trend.is_empty() {
+        let empty = Paragraph::new(Line::styled("no solves to plot yet", dim()))
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, graph);
+        return;
+    }
+
+    let plot = trend_plot(&app.trend);
+    let chart = Chart::new(vec![Dataset::default()
+        .marker(Marker::HalfBlock)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(C_TIMING))
+        .data(&plot.points)])
+    .x_axis(
+        Axis::default()
+            .style(dim())
+            .bounds(plot.x_bounds)
+            .labels([
+                Line::styled("1", dim()),
+                Line::styled(app.trend.len().to_string(), dim()),
+            ]),
+    )
+    .y_axis(
+        Axis::default()
+            .style(dim())
+            .bounds(plot.y_bounds)
+            .labels(trend_ticks(plot.y_bounds))
+            .labels_alignment(Alignment::Right),
+    )
+    .legend_position(None);
+    frame.render_widget(chart, graph);
+}
+
 // --------------------------------------------------- solve detail overlay
 
 /// One solve in full: its time, when it was recorded, and the scramble it was recorded on.
@@ -242,8 +392,9 @@ pub(super) fn draw_detail(frame: &mut Frame, app: &App, index: usize, area: Rect
 #[cfg(test)]
 mod tests {
     use super::super::testkit::{
-        app_with, mega, render, render_all, render_buffer, row_cells, row_with,
+        app_with, mega, render, render_all, render_buffer, row_cells, row_with, rows_of,
     };
+    use super::*;
     use crate::app::{App, TimerState};
     use crate::types::{Puzzle, Session, FIRST_USER_ID};
     use ratatui::buffer::Buffer;
@@ -455,6 +606,233 @@ mod tests {
         let text = render(&app, 80, 40);
         assert!(text.contains("r: load scramble"), "the detail popup is drawn");
         assert!(!text.contains(" sessions "), "the sessions popup is not");
+    }
+
+    // ----------------------------------------------------------- trend overlay
+
+    /// Every non-ASCII glyph the trend popup draws inside its border, all six of them CP437.
+    ///
+    /// Three half blocks for the line and three box characters for the axes. Ratatui's default
+    /// braille marker and the eighth blocks the trend used to be drawn with are both absent from
+    /// the classic Windows console fonts, so anything outside this set is the tofu regression.
+    const TREND_CP437: [char; 6] = ['▀', '▄', '█', '─', '│', '└'];
+
+    /// A window with a real spread in it, oldest first.
+    fn seeded_trend() -> Vec<u64> {
+        (0..30u64).map(|i| 11_000 + (i * 7_919) % 4_000).collect()
+    }
+
+    /// An app with `window` as its trend and the popup open over it.
+    fn trend_app(window: Vec<u64>) -> App {
+        let mut app = app_with(Puzzle::Cube3, 30);
+        app.trend = window;
+        app.show_trend = true;
+        app
+    }
+
+    /// The rows inside the trend popup's border, which is everything the graph may write on.
+    fn trend_inside(app: &App, w: u16, h: u16) -> Vec<String> {
+        let popup = trend_popup(Rect::new(0, 0, w, h)).expect("the terminal holds the popup");
+        rows_of(&render_buffer(app, w, h))[(popup.y + 1) as usize..(popup.y + popup.height - 1) as usize]
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .skip(popup.x as usize + 1)
+                    .take(popup.width as usize - 2)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Indexes of the rows carrying line ink, top first.
+    fn ink_rows(inside: &[String]) -> Vec<usize> {
+        inside
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.chars().any(|c| "▀▄█".contains(c)))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    #[test]
+    fn the_trend_overlay_draws_a_line_graph_between_two_labelled_axes() {
+        let app = trend_app(seeded_trend());
+        let text = render(&app, 100, 34);
+        assert!(text.contains(" trend "), "the popup is titled");
+        assert!(text.contains("esc: close"), "and keeps its bottom row for the hint");
+
+        // Three y ticks from the plot's own bounds, bottom to top, as times.
+        let plot = trend_plot(&app.trend);
+        for tick in trend_ticks(plot.y_bounds) {
+            let label: String = tick.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains(&label), "the y axis is missing the tick {:?}", label);
+        }
+        assert_eq!(
+            plot.y_bounds,
+            [11_000.0, 14_838.0],
+            "the axis spans the window and stops at its 95th percentile"
+        );
+
+        let inside = trend_inside(&app, 100, 34);
+        let last = app.trend.len().to_string();
+        assert!(
+            inside.iter().any(|row| row.contains(" 1 ") || row.trim_start().starts_with('1')),
+            "the x axis numbers its first solve: {:?}",
+            inside.last()
+        );
+        assert!(
+            inside.iter().any(|row| row.ends_with(&last)),
+            "and its last: {:?}",
+            inside
+        );
+        assert!(
+            inside.iter().any(|row| row.contains('└')),
+            "the two axis lines meet in a corner"
+        );
+        assert!(ink_rows(&inside).len() > 4, "and a line is drawn between them");
+        render_all(&app);
+    }
+
+    #[test]
+    fn the_trend_overlay_draws_nothing_a_cp437_console_cannot_render() {
+        // The regression the user hit twice: eighth blocks and braille are tofu on Windows.
+        for window in [
+            seeded_trend(),
+            vec![100, 1_180, 640, 100, 1_180, 200],
+            vec![12_000; 6],
+            vec![9_999],
+            vec![],
+            (0..50u64).map(|i| 5_000 + i * 137).collect(),
+        ] {
+            let app = trend_app(window.clone());
+            for (w, h) in [(100u16, 34u16), (80, 30), (46, 17)] {
+                for row in trend_inside(&app, w, h) {
+                    for c in row.chars() {
+                        assert!(
+                            c.is_ascii() || TREND_CP437.contains(&c),
+                            "{:?} drew {:?} at {}x{}, which no CP437 font carries: {:?}",
+                            window,
+                            c,
+                            w,
+                            h,
+                            row
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_ruined_solve_no_longer_flattens_the_rest_of_the_window() {
+        // Ten solves half a second apart and one sixty second disaster. Scaled to the maximum
+        // the cluster collapses onto the bottom row, which is the graph the user complained about.
+        let mut window: Vec<u64> = (0..10).map(|i| 480 + i * 8).collect();
+        window.push(60_000);
+        let plot = trend_plot(&window);
+        assert_eq!(plot.y_bounds, [480.0, 552.0], "the axis tops out below the disaster");
+        assert_eq!(
+            plot.points.last(), Some(&(10.0, 552.0)),
+            "which the disaster is pinned to rather than owning"
+        );
+
+        let inside = trend_inside(&trend_app(window), 100, 34);
+        assert!(
+            ink_rows(&inside).len() > 6,
+            "the cluster keeps its own spread over the height: {:?}",
+            inside
+        );
+    }
+
+    #[test]
+    fn a_window_with_nothing_to_separate_draws_one_flat_line() {
+        for window in [vec![12_000; 20], vec![9_999]] {
+            let inside = trend_inside(&trend_app(window.clone()), 100, 34);
+            assert_eq!(
+                ink_rows(&inside).len(),
+                1,
+                "{:?} is one height, not a slope: {:?}",
+                window,
+                inside
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_trend_says_so_instead_of_drawing_empty_axes() {
+        let app = trend_app(Vec::new());
+        let text = render(&app, 100, 34);
+        assert!(text.contains("no solves to plot yet"));
+        assert!(text.contains("esc: close"), "the hint is drawn either way");
+        assert!(
+            !text.contains('└'),
+            "and no axis is drawn for a window with nothing in it"
+        );
+    }
+
+    #[test]
+    fn the_trend_overlay_is_skipped_on_a_terminal_too_small_to_read_it() {
+        let app = trend_app(seeded_trend());
+        render_all(&app);
+        for (w, h) in [(43u16, 40u16), (80, 15), (30, 8), (10, 4), (1, 1)] {
+            let text = render(&app, w, h);
+            assert!(
+                !text.contains(" trend "),
+                "{}x{} has no room for a readable graph",
+                w,
+                h
+            );
+        }
+        assert!(render(&app, 44, 16).contains(" trend "), "and 44x16 is where it starts");
+    }
+
+    #[test]
+    fn the_solve_detail_overlay_wins_over_the_trend_overlay() {
+        let mut app = trend_app(seeded_trend());
+        app.solve_detail = Some(0);
+        let text = render(&app, 100, 40);
+        assert!(text.contains("r: load scramble"), "the detail popup is drawn");
+        assert!(!text.contains(" trend "), "the trend popup is not");
+    }
+
+    // ---- the y domain, as a pure function
+
+    #[test]
+    fn the_axis_ceiling_is_the_ninety_fifth_percentile_by_nearest_rank() {
+        let sorted: Vec<u64> = (1..=50).collect();
+        assert_eq!(trend_top(&sorted), 48, "of fifty, the two slowest are outside");
+        assert_eq!(trend_top(&(1..=20).collect::<Vec<u64>>()), 19);
+        assert_eq!(trend_top(&(1..=11).collect::<Vec<u64>>()), 10);
+        assert_eq!(trend_top(&[1, 2, 3, 4, 900]), 4, "five is where trimming starts");
+
+        // Under that there is nothing to call an outlier and the maximum is the ceiling.
+        assert_eq!(trend_top(&[1, 2, 3, 900]), 900);
+        assert_eq!(trend_top(&[1, 900]), 900, "a two-value window still shows its rise");
+        assert_eq!(trend_top(&[7]), 7);
+    }
+
+    #[test]
+    fn a_flat_or_lone_window_is_plotted_as_a_line_across_the_middle() {
+        let flat = trend_plot(&[12_000; 4]);
+        assert_eq!(flat.y_bounds, [11_999.0, 12_001.0], "the line lands mid height");
+        assert!(flat.points.iter().all(|(_, y)| *y == 12_000.0));
+
+        let lone = trend_plot(&[9_999]);
+        assert_eq!(lone.points, [(0.0, 9_999.0), (1.0, 9_999.0)], "one solve is a flat line");
+        assert_eq!(lone.x_bounds, [0.0, 1.0]);
+
+        // Nothing at all never panics and never divides by zero.
+        let empty = trend_plot(&[]);
+        assert!(empty.points.is_empty());
+        assert_eq!(empty.x_bounds, [0.0, 1.0]);
+        assert_eq!(empty.y_bounds, [-1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_two_value_window_spans_both_of_its_values() {
+        let plot = trend_plot(&[10_000, 12_000]);
+        assert_eq!(plot.y_bounds, [10_000.0, 12_000.0]);
+        assert_eq!(plot.points, [(0.0, 10_000.0), (1.0, 12_000.0)]);
     }
 
     /// The overlays sit on top of the frame, so an open one must survive every timer state.

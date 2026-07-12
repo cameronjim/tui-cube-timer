@@ -154,6 +154,7 @@ spaces do not matter.
 | `/hidetime` | hide or show the running time while you solve |
 | `/export [path]` | write every session out as a csTimer file |
 | `/import <path>` | read a csTimer file in as new sessions |
+| `/trend` | open and close the graph of your last 50 solves |
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
@@ -324,21 +325,29 @@ session rather than across the seam between two of them. On a narrow terminal a
 row drops entries from the right rather than wrapping, so the numbers you look at
 most stay put.
 
-When the window is tall enough, a two row sparkline labelled `trend` appears
-under those three rows, plotting your last fifty solves with the newest at the
-right. The bars are times, so a dip is a fast solve and a rising staircase is a
-session going the wrong way. They span the window itself rather than counting up
-from zero: your fastest solve of the fifty is the lowest bar, your slowest fills
-both rows, and everything else sits between the two. That makes the shape of a
-tight session readable instead of flattening it into one solid block, and it
-also means the bars say nothing about how you are doing against another day.
-Every solve in the window draws a bar, however fast it was, so the line never
-breaks, and a window with nothing to separate draws flat. DNFs have no time to
-draw and are simply absent. It is the first thing the left column gives up: the
-moment the terminal is too short to hold both the bars and the big digits, the
-sparkline goes and the digits stay.
-On a panel too narrow for fifty bars the oldest solves are dropped rather than
-the newest.
+`/trend` graphs your last fifty solves in a popup, as a line with time up the
+side and the solve's place in the window along the bottom, so a dip is a fast
+solve and a climb is a session going the wrong way. The y axis is labelled with
+three times, the x axis with the first and last solve numbers, and `Esc` or
+`/trend` again closes it. It shares its slot with the help and the session
+picker, so opening one closes the other, and a solve detail popup covers all
+three.
+
+The time axis spans the window itself rather than counting up from zero, because
+solve times cluster in a band far away from zero and starting there would draw
+every session as one flat line across the top. It also stops at the window's
+95th percentile rather than its slowest solve: a single sixty second disaster
+among twelve second solves would otherwise own the whole scale and squash
+everything else onto the bottom row, so the disaster is drawn pinned to the top
+edge instead and the rest of the window keeps the height. That means the top
+label is a ceiling, not always your slowest time. A window with nothing to
+separate draws flat across the middle. DNFs have no time to plot and are simply
+absent, so a session with a run of them graphs fewer than fifty points.
+
+The graph is drawn out of `▀`, `▄` and `█` and nothing else, all of them
+characters the classic Windows console fonts carry, so it renders as a line
+rather than a row of empty boxes there. On a terminal too small to read it,
+under 44 columns or 16 rows, `/trend` draws nothing at all.
 
 Beating a personal best says so. When a solve is faster than your best ever
 single, or its ao5 beats your best ever ao5, a green `new pb` line appears over

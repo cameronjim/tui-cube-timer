@@ -53,19 +53,19 @@ Current state, 370 tests, all green:
 | Module | Tests | Focus |
 |---|---|---|
 | `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
-| `app/commands.rs` | 42 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
-| `app/mod.rs` | 41 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
-| `ui/layout.rs` | 39 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the sparkline thresholds |
+| `app/commands.rs` | 49 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
+| `app/mod.rs` | 43 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
+| `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
-| `app/selection.rs` | 20 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
+| `app/selection.rs` | 21 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `cstimer.rs` | 16 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
-| `ui/mod.rs` | 19 | Render smoke at four sizes, the chrome anchor, the stats prefix column, the trend sparkline |
+| `ui/mod.rs` | 11 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
-| `ui/overlay.rs` | 9 | All three popups at four sizes, clamping, the cursor, which one wins |
+| `ui/overlay.rs` | 19 | All four popups at four sizes, clamping, the cursor, which one wins, the trend graph's glyphs and y domain |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the personal-best banner |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
@@ -284,9 +284,12 @@ wrong reading rather than an ugly one: `cells_colored` and `row_cells` let `ui/t
 assert that stage 1 recolours the countdown *and* draws `8s` in that same colour, and that a
 `+2` takes the slot and the red back off it, and that a personal-best banner turns the
 digits under it light green while a running inspection is left alone; `rows_of` lets
-`ui/mod.rs` assert the three stats rows start their values in the same column and that the
-sparkline's bars begin in that same column, on the two rows under them. Colour and column alignment
-carry meaning here, so they are asserted directly. Beyond those, content is not asserted.
+`ui/mod.rs` assert the three stats rows start their values in the same column. `ui/overlay.rs`
+goes furthest, because the trend graph is the one widget whose glyphs are a compatibility
+contract: it sweeps every cell inside the popup border and fails on anything that is neither
+ASCII nor one of the six CP437 characters the chart is allowed to draw. Colour, column
+alignment and that glyph set carry meaning here, so they are asserted directly. Beyond those,
+content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
 moving is higher than the bug rate it would catch, and the pieces where a wrong value would

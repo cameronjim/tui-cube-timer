@@ -60,9 +60,14 @@ pub struct App {
     pub scramble: String,
     pub status_msg: Option<String>,
     pub show_help: bool,
+    /// Whether the trend graph is open over the frame.
+    ///
+    /// Non-modal like [`App::show_help`] and mutually exclusive with it and the sessions picker.
+    pub show_trend: bool,
     /// Open sessions overlay, holding the cursor's index into `save.sessions`.
     ///
-    /// Mutually exclusive with [`App::show_help`]; the solve detail wins over both.
+    /// Mutually exclusive with [`App::show_help`] and [`App::show_trend`]; the solve detail wins
+    /// over all three.
     pub sessions_overlay: Option<usize>,
     /// Times-list cursor, counted from the newest solve: 0 is the newest.
     pub times_selected: usize,
@@ -120,6 +125,7 @@ impl App {
             scramble: scramble::generate(puzzle),
             status_msg: None,
             show_help: false,
+            show_trend: false,
             sessions_overlay: None,
             times_selected: 0,
             solve_detail: None,
@@ -209,14 +215,6 @@ impl App {
 
     fn status<S: Into<String>>(&mut self, msg: S) {
         self.status_msg = Some(msg.into());
-    }
-
-    /// Toggle the help overlay. The two popups are alternatives, so opening one closes the other.
-    fn toggle_help(&mut self) {
-        self.show_help = !self.show_help;
-        if self.show_help {
-            self.sessions_overlay = None;
-        }
     }
 
     fn start_inspection(&mut self) {
@@ -436,9 +434,7 @@ impl App {
                 }
                 KeyCode::Char('h') | KeyCode::Char('?') => self.toggle_help(),
                 KeyCode::Esc => {
-                    if self.show_help {
-                        self.show_help = false;
-                    } else {
+                    if !self.close_popups() {
                         self.status_msg = None;
                     }
                 }
@@ -1088,6 +1084,29 @@ mod tests {
 
         app.on_key(press(KeyCode::Esc));
         assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_trend_graph_before_it_clears_the_status() {
+        let (mut app, _g) = test_app("key-esc-trend");
+        app.show_trend = true;
+        app.status_msg = Some("something".to_string());
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_trend);
+        assert_eq!(app.status_msg.as_deref(), Some("something"));
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn h_opens_the_help_over_an_open_trend_graph() {
+        let (mut app, _g) = test_app("key-h-trend");
+        app.show_trend = true;
+        app.on_key(press(KeyCode::Char('h')));
+        assert!(app.show_help, "'h' still reaches the help");
+        assert!(!app.show_trend, "and the graph gives way to it");
     }
 
     // ------------------------------------------------------------ constructor

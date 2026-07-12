@@ -82,6 +82,7 @@ impl App {
             "import" => self.cmd_import(rest),
             "inspect" => self.cmd_toggle_inspection(),
             "hidetime" => self.cmd_toggle_hide_time(),
+            "trend" => self.toggle_trend(),
             "help" => self.toggle_help(),
             "quit" | "q" => self.should_quit = true,
             _ => self.status(format!("unknown command: {}", cmd)),
@@ -1036,6 +1037,49 @@ mod tests {
         run_command(&mut app, "help");
         assert!(!app.show_help);
         assert_eq!(app.sessions_overlay, None);
+    }
+
+    #[test]
+    fn trend_toggles_the_graph_the_way_help_toggles_the_help() {
+        let (mut app, _g) = test_app("cmd-trend");
+        assert!(!app.show_trend, "it starts closed");
+
+        run_command(&mut app, "trend");
+        assert!(app.show_trend, "/trend opens the graph");
+        assert!(app.status_msg.is_none(), "opening a popup says nothing else");
+
+        run_command(&mut app, "trend");
+        assert!(!app.show_trend, "and the same command closes it");
+
+        // Nothing about it depends on there being solves to plot.
+        run_command(&mut app, "TREND");
+        assert!(app.show_trend, "the parser lowercases the command");
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_trend, "esc closes it like it closes the help");
+    }
+
+    #[test]
+    fn the_trend_help_and_sessions_overlays_are_all_alternatives() {
+        let (mut app, _g) = test_app("cmd-trend-exclusive");
+        run_command(&mut app, "help");
+        run_command(&mut app, "trend");
+        assert!(app.show_trend, "/trend opens the graph");
+        assert!(!app.show_help, "and closes the help");
+
+        run_command(&mut app, "help");
+        assert!(app.show_help, "/help opens the help");
+        assert!(!app.show_trend, "and closes the graph");
+
+        run_command(&mut app, "trend");
+        run_command(&mut app, "sessions");
+        assert!(app.sessions_overlay.is_some(), "/sessions opens the listing");
+        assert!(!app.show_trend, "and closes the graph");
+
+        // The listing is modal, so it is closed before the graph can come back.
+        app.on_key(press(KeyCode::Esc));
+        run_command(&mut app, "trend");
+        assert!(app.show_trend);
+        assert_eq!(app.sessions_overlay, None, "and the listing stays closed");
     }
 
     #[test]
