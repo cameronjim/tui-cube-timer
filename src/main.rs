@@ -2,6 +2,7 @@
 
 mod app;
 mod cstimer;
+mod cube;
 mod scramble;
 mod stats;
 mod storage;

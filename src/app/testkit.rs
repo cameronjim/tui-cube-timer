@@ -1,4 +1,4 @@
-//! Test scaffolding shared by the five files of `app`.
+//! Test scaffolding shared by the six files of `app`.
 //!
 //! The helpers are short on purpose: they appear dozens of times per file.
 
@@ -109,6 +109,19 @@ pub(super) fn add_solve_with(app: &mut App, millis: u64, scramble: &str) {
         scramble: scramble.to_string(),
         timestamp: 0,
     });
+}
+
+/// Assert the cached preview still equals a fresh build from the scramble on screen.
+///
+/// Written against a recomputation rather than a literal cube, so it holds for the events with
+/// a model and the events without one alike, and says which path let the cache go stale.
+pub(super) fn assert_preview_is_fresh(app: &App, when: &str) {
+    assert_eq!(
+        app.preview,
+        crate::cube::Cube::for_scramble(app.current_session().puzzle, &app.scramble),
+        "app.preview went stale {}",
+        when
+    );
 }
 
 /// Drive Idle -> Timing, backdating the arm so the release counts as held.

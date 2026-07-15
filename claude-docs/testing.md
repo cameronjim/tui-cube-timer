@@ -24,10 +24,10 @@ rule 1 support each other:
 - **I/O** goes through one module with a path parameter. Point that parameter somewhere
   disposable and it is just a function again.
 - **Rendering** used to be the exception. It is now split: the geometry moved into
-  `ui/layout.rs`, which is pure arithmetic and tested like any other pure module, and the
-  three drawing files (`ui/mod.rs`, `ui/timer.rs`, `ui/overlay.rs`) are driven through
-  ratatui's `TestBackend`. What is asserted about the resulting frame is still modest. See
-  below.
+  `ui/layout.rs` and the unfolded cube into `ui/net.rs`, both pure arithmetic and tested like
+  any other pure module, and the three drawing files (`ui/mod.rs`, `ui/timer.rs`,
+  `ui/overlay.rs`) are driven through ratatui's `TestBackend`. What is asserted about the
+  resulting frame is still modest. See below.
 
 The general shape to aim for: if something is hard to test, that is usually a boundary
 problem, not a testing problem. Move the clock read, the file path or the event source out
@@ -44,28 +44,31 @@ directly.
 A test lives with its subject, which means a split moves tests as well as code. Where two
 files inside one directory need the same scaffolding, it goes in a `#[cfg(test)] mod
 testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `release`,
-`run_command`, `perform_solve` and friends for all five files of `app/`, and a private `mod
-testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for all
-three renderers. Never duplicate a helper across sibling files.
+`run_command`, `perform_solve`, `assert_preview_is_fresh` and friends for all six files of
+`app/`, and a private `mod testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render`
+and `render_all` for all three renderers. Never duplicate a helper across sibling files.
 
-Current state, 392 tests, all green:
+Current state, 457 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
+| `app/commands.rs` | 52 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
 | `stats.rs` | 45 | Trimmed averages, penalties, session stats, session bests |
-| `app/commands.rs` | 49 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
-| `app/mod.rs` | 43 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
 | `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
+| `app/mod.rs` | 36 | State machine, keys, the stop guards, the derived caches, the preview cube behind the scramble |
+| `cube/mod.rs` | 34 | Move orders and identities at every size and width, colour conservation, direction pins, inversion, parse errors |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
-| `app/selection.rs` | 21 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
+| `ui/overlay.rs` | 25 | All five popups at four sizes, clamping, the cursor, which one wins, the trend graph's y domain, the net drawn from a known scramble, both glyph sweeps |
+| `app/selection.rs` | 23 | The times cursor, the solve-detail overlay, the sessions picker and its modality, the overlay exclusions |
+| `cstimer.rs` | 21 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
-| `cstimer.rs` | 21 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
+| `ui/net.rs` | 15 | The footprint formulas, the colour map, face placement, compact pairing, the glyph set |
 | `ui/mod.rs` | 12 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing, the best row's scope |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
-| `ui/overlay.rs` | 19 | All four popups at four sizes, clamping, the cursor, which one wins, the trend graph's glyphs and y domain |
+| `app/inspection.rs` | 12 | The countdown, the `+2` and DNF thresholds, the judge-call stages, an aborted arm |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the session-best banner |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
@@ -78,7 +81,9 @@ each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a ge
 it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
 thing, rendering every puzzle at every size, and so does
 `cstimer::every_event_exports_a_scramble_type_that_imports_back_to_it`, which fails the
-moment an event is added without a csTimer scramble type to carry it.
+moment an event is added without a csTimer scramble type to carry it. `cube/mod.rs` sweeps
+`Puzzle::ALL` twice for the same reason, once to pin which events have a model and once to
+apply a generated scramble for each that does.
 
 `cstimer.rs` is tested from both ends, and both are needed. A round trip, `export` then
 `import`, proves nothing was lost in Cubetimer's own writing, but it would pass just as
@@ -86,6 +91,33 @@ happily if both directions agreed on a format csTimer does not use. So the impor
 also run against a fixture built to the shape csTimer actually writes, string-encoded
 `sessionData` included, with a blindfolded session in it to assert the skip and a session
 naming no scramble type to assert the default.
+
+### The cube model and the preview
+
+`cube/mod.rs` is pure state, so it is tested as algebra rather than against fixtures. Every
+move applied four times, a move against its prime and a double move applied twice are all the
+identity, at every size and every legal width. Colour counts are conserved across generated
+scrambles. Direction is pinned sticker by sticker from a solved 3x3 for all six faces, and the
+sharpest test in the file needs no stickers at all:
+`two_adjacent_faces_generate_the_famous_order_of_105` asserts that `R U` returns a 3x3 to
+solved after exactly 105 repeats, for nine different adjacent pairs, which a single wrong row
+flip in any of the six cycles misses. `invert_scramble` gives the round trip its property
+test: scramble, invert, solved, for two hundred seeds on each of the seven modelled events.
+
+`ui/net.rs` is pure geometry and tested the same way `ui/layout.rs` is: the footprint formulas
+at every size in both modes, every face solid and in its net position, the gutters and corners
+unstyled, and the compact mode's row pairing including the odd cube's unpaired last row.
+
+The two of them meet the wiring in three places, and those tests are integration tests wearing
+unit-test clothes. `app/mod.rs` asserts that a generated scramble leaves a cube of the right
+size that is genuinely not solved, and that an event with no model leaves `None`.
+`ui/overlay.rs` recalls a known scramble through the real key path and then asserts named
+cells of the rendered buffer by colour: after `R` on a solved 3x3, the U face's right column
+is the front's green and F's right column is the bottom's yellow. That one assertion fails if
+`cube`'s cycle, `net`'s placement, the colour map or the popup's geometry is wrong, which is
+exactly why it is worth its length. It also sweeps the popup for glyphs and checks the compact
+fallback and the message below it. A test that spans two of these modules belongs in the file
+that owns the seam, never duplicated into both.
 
 ## Testing pure logic
 
@@ -285,11 +317,13 @@ assert that stage 1 recolours the countdown *and* draws `8s` in that same colour
 digits under it light green while a running inspection is left alone; `rows_of` lets
 `ui/mod.rs` assert the three stats rows start their values in the same column, and that a
 second session of the same puzzle changes none of them. `ui/overlay.rs`
-goes furthest, because the trend graph is the one widget whose glyphs are a compatibility
-contract: it sweeps every cell inside the popup border and fails on anything that is neither
-ASCII nor one of the six CP437 characters the chart is allowed to draw. Colour, column
-alignment and that glyph set carry meaning here, so they are asserted directly. Beyond those,
-content is not asserted.
+goes furthest, because the trend graph and the scramble net are the two widgets whose glyphs
+are a compatibility contract: it sweeps every cell inside each popup's border and fails on
+anything that is neither ASCII nor one of the CP437 characters that widget is allowed to draw,
+six for the chart and two for the net. It also reads named cells of the preview by colour,
+because a sticker in the wrong place is a wrong answer rather than an ugly one. Colour, column
+alignment and those glyph sets carry meaning here, so they are asserted directly. Beyond
+those, content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
 moving is higher than the bug rate it would catch, and the pieces where a wrong value would

@@ -43,9 +43,9 @@ the right rather than wrapping, so the numbers you look at most stay put.
 side and the solve's place in the window along the bottom, so a dip is a fast
 solve and a climb is a session going the wrong way. The y axis is labelled with
 three times, the x axis with the first and last solve numbers, and `Esc` or
-`/trend` again closes it. It shares its slot with the help and the session
-picker, so opening one closes the other, and a solve detail popup covers all
-three.
+`/trend` again closes it. It shares its slot with the help, the scramble preview
+and the session picker, so opening any of those closes it, and a solve detail
+popup covers all four.
 
 The time axis spans the window itself rather than counting up from zero, because
 solve times cluster in a band far away from zero and starting there would draw

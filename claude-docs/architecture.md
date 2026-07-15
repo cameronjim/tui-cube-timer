@@ -14,17 +14,19 @@ conventions live in [../CLAUDE.md](../CLAUDE.md); code style rules are in
 
 ## Crate layout
 
-Eight modules, each with one job. Three of them are directories, because their single
-responsibility grew large enough to need internal structure. The boundaries are
-deliberate: `stats`, `scramble` and `cstimer` are pure and know nothing about terminals,
-`ui` is read-only with respect to state, and only `storage` touches the filesystem.
+Nine modules, each with one job. Four of them are directories, three because their single
+responsibility grew large enough to need internal structure and `cube/` because it is
+expected to. The boundaries are
+deliberate: `stats`, `scramble`, `cube` and `cstimer` are pure and know nothing about
+terminals, `ui` is read-only with respect to state, and only `storage` touches the filesystem.
 
 | Module | Owns | Depends on |
 | --- | --- | --- |
 | `src/main.rs` | Terminal setup and teardown, startup load, the event loop | `app`, `storage`, `ui` |
-| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `scramble`, `stats`, `storage`, `types` |
-| `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `types` |
+| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `cube`, `scramble`, `stats`, `storage`, `types` |
+| `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `cube`, `types` |
 | `src/scramble/` | Scramble generation per puzzle | `types`, `rand` |
+| `src/cube/` | Facelet state for the NxN cubes: `Cube`, `Face`, WCA move parsing and application | `types` |
 | `src/stats.rs` | Averages, session summaries, session bests | `types` |
 | `src/cstimer.rs` | Conversion between `SaveFile` and csTimer's export format, both directions | `types`, `serde_json` |
 | `src/storage.rs` | Data file location, JSON load and atomic save, format migration, wall clock | `types` |
@@ -50,29 +52,48 @@ notation in common:
 | `square1.rs` | Twists and slashes over a 24-slot shape simulator |
 | `clock.rs` | Fifteen dial tokens around a `y2` |
 
-`src/ui/` splits the same way, along the line between drawing and arithmetic. `mod.rs`
+`src/cube/` is the other side of that coin: `scramble/` produces strings and `cube/` consumes
+them. It is 6·n·n stickers, each naming the face it belongs to when solved, and a move is a
+permutation of them. `Cube::for_scramble` is how a scramble becomes a cube and the only path
+`app` takes into the model, answering `None` for the five events with no model and for a
+scramble the parser refuses, so a generator bug degrades to a missing preview rather than a
+panic. `Cube::size` is the one other thing asked from outside, because `/preview` has to know
+whether an event has a model before it opens anything. The conventions, meaning face order,
+orientation and index arithmetic, are contract and spelled out in the module doc; the solvers
+a later phase adds will build coordinates on top of them. `Cube::is_solved` and
+`invert_scramble` are used only by the tests for now and carry a single-item
+`#[allow(dead_code)]` each, because both are load bearing for the random-state phase.
+
+`src/ui/` splits along the line between drawing and arithmetic. `mod.rs`
 holds `draw`, the header, the stats strip, the times list and the status line; `timer.rs`
 holds the big countdown in the middle of the frame and the block font it is drawn in;
-`overlay.rs` holds the four popups, the help reference, the session picker, the trend graph
-and one solve in full, which are the only things drawn over the frame rather than into it;
-`layout.rs` holds
+`overlay.rs` holds the five popups, the help reference, the session picker, the trend graph,
+the scramble preview and one solve in full, which are the only things drawn over the frame
+rather than into it; `net.rs` turns a `Cube` into the block-glyph lines the preview popup
+draws; `layout.rs` holds
 the pure geometry, meaning panel heights, word wrapping, popup placement, the visible slice
-of a scrolling list and `inner_of`. Nothing in `layout.rs` sees a `Frame` or an `App`, which
-is what makes the degradation rules testable as ordinary functions rather than by eye.
+of a scrolling list and `inner_of`. Neither `layout.rs` nor `net.rs` sees a `Frame` or an
+`App`, which is what makes the degradation rules testable as ordinary functions rather than
+by eye.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 380 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 384 |
 | `timer.rs` | `timer_view`, `draw_timer`, the session-best banner, `GLYPH_H` and the 5-row block font | 207 |
-| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_detail`, `trend_plot` | 391 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_preview`, `draw_detail`, `trend_plot` | 456 |
 | `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 280 |
+| `net.rs` | `size` and `lines`: the net's footprint and its rows, full and compact | 155 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
 the single `pub(super) fn on_command_key` and never touched from outside `app`.
+`inspection.rs` is the fifteen second countdown: the five thresholds, the two judge calls,
+the penalty they earn and the keys the `Inspecting` state answers. It is the one part of the
+timer with a vocabulary of its own, which is what made it the seam to cut when the state
+machine ran out of room.
 `selection.rs` is the state that says which solve or session you are pointing at and which
 overlay is up, none of which the timer reads: the times cursor, the solve-detail overlay,
-the sessions picker and the two non-modal toggles behind `/help` and `/trend`.
+the sessions picker and the three non-modal toggles behind `/help`, `/trend` and `/preview`.
 `progress.rs` answers "how is this session going", which is the trend window and the
 session-best celebration, neither of which is timer state. `repair.rs` answers "is this
 save file internally consistent", which nothing in the timer flow ever asks, and is a
@@ -82,12 +103,13 @@ they had when `app` was one file.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 493 |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 432 |
-| `selection.rs` | `toggle_help`, `toggle_trend`, `close_popups`, `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 150 |
+| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived`, `refresh_preview` | 454 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 446 |
+| `selection.rs` | `toggle_help`, `toggle_trend`, `toggle_preview`, `close_popups`, `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 165 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
+| `inspection.rs` | The `INSPECTION_*` thresholds, `start_inspection`, `cancel_inspection`, `refresh_inspection`, `on_key_inspecting` | 80 |
 | `progress.rs` | `trend_of`, `best_banner_text`, `note_best`, `clear_best_banner`, `expire_best_banner` | 77 |
-| `testkit.rs` | `#[cfg(test)]` scaffolding the other five share: `TempPath`, `test_app`, `press`, `run_command` | 147 |
+| `testkit.rs` | `#[cfg(test)]` scaffolding the other six share: `TempPath`, `test_app`, `press`, `run_command` | 160 |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
 to persistence or rendering never ripples into it. The dependency graph is acyclic and
@@ -189,6 +211,28 @@ next solve has begun. Arming does not, so glancing at the banner and reaching fo
 bar does not cost you the rest of the five seconds. `ui::timer` reads the field twice, once
 for the bold black-on-light-green line it inserts above the digits and once to colour the
 idle digits underneath in the same light green.
+
+### The preview cube
+
+The scramble preview is cached on the same principle:
+
+```rust
+/// The cube the scramble on screen produces, cached by `App::refresh_preview`.
+pub preview: Option<crate::cube::Cube>,
+```
+
+`refresh_preview` is one line, `Cube::for_scramble(self.puzzle(), &self.scramble)`, and every
+path that assigns `scramble` calls it: `new_scramble`, which covers a fresh scramble, a solve,
+and every session or puzzle change, plus `recall_scramble`, which puts an old solve's scramble
+back on screen. `App::new` calls it once after `refresh_derived`. It is computed whether the
+popup is open or not, because the alternative is computing it in `draw`, and a 7x7 scramble is
+100 moves over 294 stickers, which is not work for a loop that runs every 15 ms.
+
+`None` means one of two things and the renderer says which: the event has no model (`Cube::size`
+answers `None` for Pyraminx, Skewb, Megaminx, Square-1 and Clock) or the model refused a token.
+Neither is an error worth interrupting a solve for, so neither reaches the status line from
+here. `/preview` is the one place that does explain itself, refusing to open on an event with no
+model with `no preview for <event> yet` rather than opening a popup that could only apologise.
 
 ### Selection state and the judge-call stage
 
@@ -475,12 +519,12 @@ the scroll keys and `q` all keep working immediately after a solve.
 **Ctrl-C** is checked before both guards and sets `should_quit` unconditionally, since raw
 mode swallows the signal the shell would normally deliver.
 
-### Selection: the times cursor and the four overlays
+### Selection: the times cursor and the five overlays
 
 Everything in this section lives in `app/selection.rs`. It is reached from keys the timer
 does not want, and it changes no timer state, which is the whole reason it is not in
-`mod.rs`. That includes `toggle_help`, `toggle_trend` and `close_popups`, the three
-functions behind the two overlays that are flags rather than cursors.
+`mod.rs`. That includes `toggle_help`, `toggle_trend`, `toggle_preview` and `close_popups`,
+the four functions behind the three overlays that are flags rather than cursors.
 
 The times list carries a selection rather than a scroll offset. `on_key_idle` hands the
 cursor keys to `on_key_times`, which moves `times_selected` by 1 for the arrows and `j`/`k`,
@@ -513,13 +557,15 @@ if self.sessions_overlay.is_some() {
 }
 ```
 
-The precedence runs **detail > sessions > trend > help**. Detail outranks sessions because
-you can only have opened it on top of the list, so closing gives back the thing underneath
-rather than the whole screen at once. Neither the trend graph nor the help is modal, and no
-two of the bottom three can be open at once: `toggle_help` and `toggle_trend` each clear
-the other two, and `open_sessions_overlay` clears both flags, so the exclusion is enforced
-where the state changes rather than in the renderer. `Esc` in `on_key_idle` goes through
-`close_popups`, which takes down whichever of the two flags is up and reports whether there
+The precedence runs **detail > preview > sessions > trend > help**. Detail outranks the rest
+because you can only have opened it on top of one of them, so closing gives back the thing
+underneath rather than the whole screen at once. Only detail and the sessions picker are modal,
+and no two of the bottom four can be open at once: `toggle_help`, `toggle_trend` and
+`toggle_preview` each clear the other three, and `open_sessions_overlay` clears all three
+flags, so the exclusion is enforced where the state changes rather than in the renderer. That
+makes the order among those four unobservable; it is written down so the renderer and the key
+handler agree on one. `Esc` in `on_key_idle` goes through
+`close_popups`, which takes down whichever of the three flags is up and reports whether there
 was one, so a bare `Esc` still clears the status line when there is no popup to close.
 
 Only three keys do anything inside the detail overlay: `r` calls `recall_scramble`, `Esc`
@@ -580,6 +626,7 @@ produces `unknown command: <verb>` in the status line.
 | `/export [path]` | Write every session out as a csTimer export, `cstimer_YYYYMMDD_HHMMSS.txt` by default |
 | `/import <path>` | Adopt a csTimer export, every session in it as a new one |
 | `/trend` | Toggle the trend graph overlay |
+| `/preview` | Toggle the scramble preview overlay, refused on an event with no cube model |
 | `/help` | Toggle the help overlay |
 | `/quit`, `/q` | Quit |
 
@@ -968,7 +1015,7 @@ panic and without a blank screen:
   [algorithms.md](algorithms.md). The x axis carries the first and last solve numbers of
   the window. The whole window is plotted whatever the width, since a line survives two
   solves sharing a column and dropping the oldest would make the x axis lie.
-- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 30
+- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 33
   text rows inside its border, placed by `centered()`, which clamps both to the available
   area. It is skipped entirely below 4 by 4. The height follows the content rather than
   being a constant because the content grows: `draw_help` builds the puzzle row from
@@ -987,6 +1034,14 @@ panic and without a blank screen:
   states a row can be in are deliberately different marks: the active session keeps a `>` in
   the marker column, the cursor reverses its whole row, and the row that is both reads as a
   reversed row with a marker on it.
+- **Preview overlay** is sized by the net it holds rather than by a constant, so
+  `preview_popup` settles the mode before the border is drawn: it asks `net::size` for the full
+  footprint (8n+3 by 3n+2), takes it if the border fits the area, falls back to the compact
+  net's (8n+3 by 3·⌈n/2⌉+2), and drops to a `PREVIEW_MSG_W` (30) by 3 message box when neither
+  does. Unlike the trend graph it is never skipped outright, because the user just asked for it:
+  a cube with nowhere to go says `terminal too small` and an event with no model says
+  `no preview for this event`, both centered and dim. The popup title carries the event name,
+  which is the one thing the net itself cannot say.
 - **Solve-detail overlay** is `DETAIL_W` (52) columns and grows with the scramble it has to
   show: `detail_popup` runs the scramble through the same `scramble_rows` the header uses,
   adds `DETAIL_FIXED_ROWS` of 6 for the time, the date, the hint and the blanks between
@@ -994,14 +1049,16 @@ panic and without a blank screen:
   one-line scramble at the floor. `centered()` clamps it like the help popup, and
   `draw_detail` returns early below 4 by 4.
 
-`draw` picks one popup and only one, in the same order `on_key` does: detail, then sessions,
-then trend, then help. The detail popup wins because it is the one the user just asked for
-and the only thing that can be opened on top of the list. No two of the other three can be
-open in the first place: `App::toggle_help` and `App::toggle_trend` each clear the other
-flag and `sessions_overlay`, and `open_sessions_overlay` clears both flags, so the exclusion
-is enforced where the state changes rather than in the renderer. The trend graph and the
-help are the two non-modal popups, so the keys behind either keep working and `Esc`, through
-`close_popups`, takes whichever is up down before it moves on to clearing the status line.
+`draw` picks one popup and only one, in the same order `on_key` does: detail, then preview,
+then sessions, then trend, then help. The detail popup wins because it is the one the user just
+asked for and the only thing that can be opened on top of the list. No two of the other four can
+be open in the first place: `App::toggle_help`, `App::toggle_trend` and `App::toggle_preview`
+each clear the other two flags and `sessions_overlay`, and `open_sessions_overlay` clears all
+three flags, so the exclusion is enforced where the state changes rather than in the renderer.
+The trend graph, the preview and the
+help are the three non-modal popups, so the keys behind any of them keep working and `Esc`,
+through `close_popups`, takes whichever is up down before it moves on to clearing the status
+line.
 
 ### The adaptive header
 

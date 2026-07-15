@@ -1,5 +1,5 @@
-//! The four popups drawn over the frame: the key and command reference, the session picker,
-//! the trend graph, and one solve in full.
+//! The five popups drawn over the frame: the key and command reference, the session picker,
+//! the trend graph, the scramble as a cube, and one solve in full.
 //!
 //! All are read-only over [`App`] like the rest of [`ui`](super), and all clamp themselves
 //! to the terminal instead of assuming there is room.
@@ -17,8 +17,9 @@ use super::layout::{
     centered, detail_popup, inner_of, list_window, puzzle_help_rows, sessions_popup, trend_popup,
     HELP_KEY_W, HELP_W, SESSIONS_NAME_W,
 };
-use super::{dim, C_ACCENT, C_IDLE, C_INSPECT, C_TIMING, C_WORST};
+use super::{dim, net, C_ACCENT, C_IDLE, C_INSPECT, C_TIMING, C_WORST};
 use crate::app::App;
+use crate::cube::Cube;
 use crate::types::{format_millis, format_solve, format_timestamp, Penalty, Puzzle};
 
 /// The border every popup shares, titled and accented so they read as one layer.
@@ -86,6 +87,7 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("/export [path]", "write your times as a csTimer .txt file"),
         help_row("/import <path>", "bring csTimer sessions in as new sessions"),
         help_row("/trend", "graph the last 50 solves"),
+        help_row("/preview", "show the cube the scramble makes"),
         help_row("/help", "toggle this help"),
         help_row("/quit  /q", "quit"),
         Line::from(""),
@@ -334,6 +336,69 @@ pub(super) fn draw_trend(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(chart, graph);
 }
 
+// -------------------------------------------------------- preview overlay
+
+/// Columns the preview popup falls back to when it has a sentence to show instead of a net.
+const PREVIEW_MSG_W: u16 = 30;
+
+/// Where the preview popup sits, and which net mode fits inside it.
+///
+/// `n` is the cube's size, or None for an event with no model. The popup is sized to the net it
+/// holds, so the mode is settled before the border is drawn: full size first, the half block
+/// compact net second, and the message box last. Unlike the trend graph the popup is never
+/// skipped outright, because "too small" is worth saying when the user just asked for it.
+fn preview_popup(n: Option<u8>, area: Rect) -> (Rect, Option<bool>) {
+    if let Some(n) = n {
+        for compact in [false, true] {
+            let (w, h) = net::size(n, compact);
+            let (want_w, want_h) = (w.saturating_add(2), h.saturating_add(2));
+            let popup = centered(want_w, want_h, area);
+            if popup.width == want_w && popup.height == want_h {
+                return (popup, Some(compact));
+            }
+        }
+    }
+    (centered(PREVIEW_MSG_W, 3, area), None)
+}
+
+/// The scramble on screen as the cube it produces: six faces unfolded into a flat net.
+///
+/// Every sticker is read from [`App::preview`], which `app` rebuilt when the scramble changed,
+/// so this draws a cube it never turns. Seven of the twelve events have a model; the other five
+/// get the line saying so, as does a terminal with no room for even the compact net.
+pub(super) fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
+    let (popup, mode) = preview_popup(app.preview.as_ref().map(Cube::n), area);
+    if popup.width < 4 || popup.height < 3 {
+        return;
+    }
+
+    let title = format!(" {} preview ", app.current_session().puzzle.name());
+    frame.render_widget(Clear, popup);
+    frame.render_widget(popup_block(title), popup);
+
+    let inner = inner_of(popup);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    match (app.preview.as_ref(), mode) {
+        (Some(cube), Some(compact)) => {
+            let net_view = Paragraph::new(Text::from(net::lines(cube, compact)))
+                .alignment(Alignment::Center);
+            frame.render_widget(net_view, inner);
+        }
+        // A cube with nowhere to draw it, then an event whose cube Cubetimer cannot build yet.
+        (cube, _) => {
+            let text = if cube.is_some() {
+                "terminal too small"
+            } else {
+                "no preview for this event"
+            };
+            let msg = Paragraph::new(Line::styled(text, dim())).alignment(Alignment::Center);
+            frame.render_widget(msg, inner);
+        }
+    }
+}
+
 // --------------------------------------------------- solve detail overlay
 
 /// One solve in full: its time, when it was recorded, and the scramble it was recorded on.
@@ -398,7 +463,8 @@ mod tests {
     use crate::app::{App, TimerState};
     use crate::types::{Puzzle, Session, FIRST_USER_ID};
     use ratatui::buffer::Buffer;
-    use ratatui::style::Modifier;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::style::{Color, Modifier};
 
     /// Cells of row `y` drawn reversed, which is how the cursor marks the row it is on.
     fn reversed_in(buffer: &Buffer, y: usize) -> usize {
@@ -833,6 +899,197 @@ mod tests {
         let plot = trend_plot(&[10_000, 12_000]);
         assert_eq!(plot.y_bounds, [10_000.0, 12_000.0]);
         assert_eq!(plot.points, [(0.0, 10_000.0), (1.0, 12_000.0)]);
+    }
+
+    // ---------------------------------------------------------- preview overlay
+
+    #[test]
+    fn the_preview_overlay_says_so_for_an_event_with_no_cube_model() {
+        let mut app = app_with(Puzzle::Megaminx, 3);
+        assert!(
+            app.preview.is_none(),
+            "megaminx has no model to preview yet"
+        );
+        app.show_preview = true;
+        render_all(&app);
+
+        let text = render(&app, 80, 30);
+        assert!(
+            text.contains(" megaminx preview "),
+            "the popup is titled with the event"
+        );
+        assert!(
+            text.contains("no preview for this event"),
+            "and says why it is empty rather than framing nothing"
+        );
+    }
+
+    #[test]
+    fn the_solve_detail_overlay_wins_over_the_preview_overlay() {
+        let mut app = app_with(Puzzle::Megaminx, 3);
+        app.show_preview = true;
+        app.solve_detail = Some(0);
+        let text = render(&app, 80, 40);
+        assert!(text.contains("r: load scramble"), "the detail popup is drawn");
+        assert!(!text.contains(" preview "), "the preview popup is not");
+    }
+
+    /// The message box is the popup's floor: it is placed and clamped like every other popup.
+    #[test]
+    fn the_preview_popup_without_a_cube_fits_the_terminal_it_is_drawn_on() {
+        for w in 0..80u16 {
+            for h in 0..40u16 {
+                let (popup, mode) = preview_popup(None, Rect::new(0, 0, w, h));
+                assert_eq!(mode, None, "no cube, no net mode");
+                assert!(
+                    popup.x + popup.width <= w && popup.y + popup.height <= h,
+                    "{:?} escapes {}x{}",
+                    popup,
+                    w,
+                    h
+                );
+            }
+        }
+    }
+
+    /// Every non-ASCII glyph the preview popup draws inside its border, both of them CP437.
+    ///
+    /// The full net's whole block and the compact net's upper half. The sentence the popup falls
+    /// back to is ASCII, so anything outside this set is the tofu regression the trend chart
+    /// already guards against.
+    const PREVIEW_CP437: [char; 2] = ['█', '▀'];
+
+    /// One key press, built the way `app`'s own tests build them.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// The preview open on `puzzle` over the scramble the generator handed it.
+    fn open_preview(puzzle: Puzzle) -> App {
+        let mut app = app_with(puzzle, 3);
+        app.show_preview = true;
+        app
+    }
+
+    /// The preview open on `puzzle` over exactly `scramble`.
+    ///
+    /// The scramble arrives by recalling it from a solve through the real key path, so the cube
+    /// behind the net is the one `app` built from it rather than one this test planted.
+    fn preview_of(puzzle: Puzzle, scramble: &str) -> App {
+        let mut app = app_with(puzzle, 1);
+        app.current_session_mut().solves[0].scramble = scramble.to_string();
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Char('r')));
+        assert_eq!(app.scramble, scramble, "the recall put the scramble on screen");
+        app.show_preview = true;
+        app
+    }
+
+    /// The rows inside the preview popup's border, which is everything the net may write on.
+    fn preview_inside(app: &App, w: u16, h: u16) -> Vec<String> {
+        let (popup, _) = preview_popup(app.preview.as_ref().map(Cube::n), Rect::new(0, 0, w, h));
+        if popup.width < 3 || popup.height < 3 {
+            return Vec::new();
+        }
+        rows_of(&render_buffer(app, w, h))
+            [(popup.y + 1) as usize..(popup.y + popup.height - 1) as usize]
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .skip(popup.x as usize + 1)
+                    .take(popup.width as usize - 2)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_preview_draws_the_cube_the_scramble_actually_makes() {
+        let app = preview_of(Puzzle::Cube3, "R");
+        let (popup, mode) = preview_popup(Some(3), Rect::new(0, 0, 80, 30));
+        assert_eq!(mode, Some(false), "eighty by thirty holds the full sized net");
+
+        let buffer = render_buffer(&app, 80, 30);
+        // The net fills the popup's inside exactly, so its own top left is the inside's.
+        let inner = inner_of(popup);
+        let at = |row: u16, col: u16| {
+            row_cells(&buffer, (inner.y + row) as usize)[(inner.x + col) as usize]
+        };
+
+        // U and D are indented by the L face and its gutter, which is seven cells on a 3x3, and
+        // every sticker is two cells wide: U's third column is cells 11 and 12 of rows 0 to 2.
+        // The middle band starts three rows below, so F's third column is cells 11 and 12 of
+        // rows 4 to 6. One R turn stains both, so this pins `cube`, `net` and the geometry here
+        // against each other rather than any one of them against itself.
+        for r in 0..3u16 {
+            for c in [11u16, 12] {
+                let drawn = at(r, c);
+                assert_eq!(drawn.symbol(), "█", "full mode draws whole blocks");
+                assert_eq!(
+                    drawn.fg,
+                    Color::Green,
+                    "R lifts the front onto U's right column, and the front is green"
+                );
+                assert_eq!(
+                    at(4 + r, c).fg,
+                    Color::Yellow,
+                    "and the bottom onto F's, which is yellow"
+                );
+            }
+            for c in 7..11u16 {
+                assert_eq!(at(r, c).fg, Color::White, "the rest of U keeps its own colour");
+            }
+        }
+
+        let text = render(&app, 80, 30);
+        assert!(text.contains(" 3x3 preview "), "the popup is titled with the event");
+        render_all(&app);
+    }
+
+    #[test]
+    fn a_frame_too_short_for_the_full_net_falls_back_to_the_compact_one() {
+        let app = open_preview(Puzzle::Cube7);
+        // A 7x7 net is 23 rows tall in full mode and 14 in compact, plus a border row each side.
+        assert_eq!(preview_popup(Some(7), Rect::new(0, 0, 80, 30)).1, Some(false));
+        assert_eq!(preview_popup(Some(7), Rect::new(0, 0, 80, 20)).1, Some(true));
+
+        let full = preview_inside(&app, 80, 30).concat();
+        assert!(full.contains('█'), "the full net draws whole blocks");
+        assert!(!full.contains('▀'), "and no half ones");
+
+        let compact = preview_inside(&app, 80, 20).concat();
+        assert!(
+            compact.contains('▀'),
+            "the compact net pairs two sticker rows into a half block"
+        );
+        assert!(!compact.contains('█'), "and draws no whole ones");
+
+        // Too small for either, and the popup says so rather than framing a clipped cube.
+        let text = render(&app, 40, 10);
+        assert!(text.contains(" 7x7 preview "), "the popup is still titled");
+        assert!(text.contains("terminal too small"));
+    }
+
+    #[test]
+    fn the_preview_overlay_draws_nothing_a_cp437_console_cannot_render() {
+        for puzzle in Puzzle::ALL {
+            let app = open_preview(puzzle);
+            for (w, h) in [(120u16, 60u16), (80, 30), (80, 20), (60, 18), (40, 10), (20, 6)] {
+                for row in preview_inside(&app, w, h) {
+                    for c in row.chars() {
+                        assert!(
+                            c.is_ascii() || PREVIEW_CP437.contains(&c),
+                            "{} drew {:?} at {}x{}, which no CP437 font carries: {:?}",
+                            puzzle.name(),
+                            c,
+                            w,
+                            h,
+                            row
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The overlays sit on top of the frame, so an open one must survive every timer state.

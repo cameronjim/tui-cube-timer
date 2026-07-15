@@ -114,11 +114,14 @@ a line-count split. Never split by "first half, second half".
 The three directories show what a good split looks like. `scramble/` divides by puzzle
 family, because the generators share nothing but the `Rng` they are handed. `ui/` divides
 by kind of work: `mod.rs` draws the frame, `timer.rs` draws the one panel with a rendering
-model of its own, `overlay.rs` draws the popups over both, and `layout.rs` computes geometry
-and touches neither `Frame` nor `App`, which turned the degradation rules from something
-checked by eye into ordinary unit tests. `app/` divides by question asked: `repair.rs`
+model of its own, `overlay.rs` draws the popups over both, and `layout.rs` and `net.rs`
+compute geometry and touch neither `Frame` nor `App`, which turned the degradation rules and
+the unfolded cube from something checked by eye into ordinary unit tests. `app/` divides by
+question asked: `repair.rs`
 answers "is this save file internally consistent" as free functions over `&mut SaveFile`,
 `commands.rs` owns command mode behind the single `on_command_key` entry point,
+`inspection.rs` owns the fifteen second countdown and the two judge calls, the one part of
+the timer with a vocabulary of its own,
 `selection.rs` owns which solve or session you are pointing at and which overlay is up,
 neither of which the timer asks,
 `progress.rs` owns how the session is going, which is the trend and the session-best
@@ -131,21 +134,24 @@ that `app` became a directory. Second, tests move with their subject, and the sc
 they share moves to a `#[cfg(test)] mod testkit` beside them rather than being duplicated.
 
 A third habit is worth naming from the splits that produced `app/selection.rs`,
-`ui/timer.rs` and `app/progress.rs`: the parent keeps one entry point per cluster and the
-child keeps everything behind it. `on_key_idle` hands its cursor keys to
+`ui/timer.rs`, `app/progress.rs` and `app/inspection.rs`: the parent keeps one entry point
+per cluster and the child keeps everything behind it. `on_key_idle` hands its cursor keys to
 `selection::on_key_times` rather than importing `TIMES_PAGE` back out, `draw_body` calls
-`timer::draw_timer` rather than knowing what `GLYPH_H` is, and `on_tick` calls
-`expire_best_banner` rather than knowing that the banner lasts five seconds. A constant that
+`timer::draw_timer` rather than knowing what `GLYPH_H` is, `on_tick` calls
+`expire_best_banner` rather than knowing that the banner lasts five seconds, and it calls
+`refresh_inspection` rather than knowing that fifteen seconds costs a `+2`. A constant that
 has to travel back up to the parent is a sign the cut was made one function too deep.
 
-No file in `src/` is over the line now, but one is close enough to name. `app/mod.rs` is at
-492 non-test lines after the trend, the session-best banner and the overlay toggles moved
-out to `app/progress.rs` and `app/selection.rs`, which is under 500 with nothing to spare;
-the next cut there is the inspection cluster, meaning the five `INSPECTION_*` constants with
-`start_inspection`, `cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind
-them. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391, `ui/mod.rs` at 380,
-`cstimer.rs` at 372 and `storage.rs` at 345, none of which has a seam worth cutting yet.
-Treat growth past roughly 500 in any of them as the prompt to look again.
+No file in `src/` is over the line now, but one is close enough to name. The inspection
+cluster has been cut out to `app/inspection.rs`, which put `app/mod.rs` back to 454 non-test
+lines, so the file closest to the line is `ui/overlay.rs` at 456. The cut waiting there is
+the trend cluster, meaning `TREND_PERCENTILE`, `TREND_TRIM_MIN`, `TREND_FLAT_PAD` and the
+`TrendPlot` arithmetic of `trend_top`, `trend_plot` and `trend_ticks` behind `draw_trend`:
+four of the five popups lay text out and that one computes a picture, which is the same kind
+of separate vocabulary the inspection thresholds were. Behind it are `app/mod.rs` at 454,
+`app/commands.rs` at 446, `ui/mod.rs` at 384, `cstimer.rs` at 372, `storage.rs` at 345 and
+`cube/mod.rs` at 319, none of which has a seam worth cutting yet. Treat growth past roughly
+500 in any of them as the prompt to look again.
 
 ## Comments
 

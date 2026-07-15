@@ -101,6 +101,7 @@ spaces do not matter.
 | `/export [path]` | write every session out as a csTimer file |
 | `/import <path>` | read a csTimer file in as new sessions |
 | `/trend` | open and close the graph of your last 50 solves |
+| `/preview` | open and close the cube your scramble makes, for the cubes and one-handed |
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
@@ -119,7 +120,7 @@ The user guide is in `docs/`, one topic per file:
 - [Stats and the trend graph](docs/stats-and-trend.md): WCA averages, the stats strip, `/trend`, and the session-best banner.
 - [Taking your times with you](docs/import-export.md): `/export` and `/import`, and how they line up with csTimer.
 - [Where your times live](docs/your-data.md): the save file, autosave, and `CUBETIMER_DATA`.
-- [Scrambles](docs/scrambles.md): the notation, and how official each event's scrambles really are.
+- [Scrambles](docs/scrambles.md): the notation, how official each event's scrambles really are, and `/preview`.
 
 Everything about how Cubetimer is put together, the event loop, the module
 boundaries, the save-file versioning and the scramble research, lives in

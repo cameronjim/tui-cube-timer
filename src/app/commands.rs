@@ -83,6 +83,7 @@ impl App {
             "inspect" => self.cmd_toggle_inspection(),
             "hidetime" => self.cmd_toggle_hide_time(),
             "trend" => self.toggle_trend(),
+            "preview" => self.cmd_toggle_preview(),
             "help" => self.toggle_help(),
             "quit" | "q" => self.should_quit = true,
             _ => self.status(format!("unknown command: {}", cmd)),
@@ -374,6 +375,19 @@ impl App {
         };
         self.status(msg);
         self.save_now();
+    }
+
+    /// Toggle the scramble preview, refusing the events whose cube Cubetimer cannot build yet.
+    ///
+    /// The refusal names the event rather than the missing model, because the event is what the
+    /// user chose. Closing an open preview is never refused, whatever the session is now on.
+    fn cmd_toggle_preview(&mut self) {
+        let puzzle = self.puzzle();
+        if !self.show_preview && crate::cube::Cube::size(puzzle).is_none() {
+            self.status(format!("no preview for {} yet", puzzle.name()));
+            return;
+        }
+        self.toggle_preview();
     }
 
     fn cmd_toggle_inspection(&mut self) {
@@ -1079,6 +1093,78 @@ mod tests {
         app.on_key(press(KeyCode::Esc));
         run_command(&mut app, "trend");
         assert!(app.show_trend);
+        assert_eq!(app.sessions_overlay, None, "and the listing stays closed");
+    }
+
+    #[test]
+    fn preview_toggles_the_cube_the_way_trend_toggles_the_graph() {
+        let (mut app, _g) = test_app("cmd-preview");
+        assert!(!app.show_preview, "it starts closed");
+
+        run_command(&mut app, "preview");
+        assert!(app.show_preview, "/preview opens the cube");
+        assert!(app.status_msg.is_none(), "opening a popup says nothing else");
+
+        run_command(&mut app, "preview");
+        assert!(!app.show_preview, "and the same command closes it");
+
+        run_command(&mut app, "PREVIEW");
+        assert!(app.show_preview, "the parser lowercases the command");
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_preview, "esc closes it like it closes the help");
+    }
+
+    #[test]
+    fn preview_refuses_an_event_with_no_cube_model_yet() {
+        let (mut app, _g) = test_app("cmd-preview-unsupported");
+        run_command(&mut app, "megaminx");
+
+        run_command(&mut app, "preview");
+        assert_eq!(app.status_msg.as_deref(), Some("no preview for megaminx yet"));
+        assert!(!app.show_preview, "and nothing opens over the frame");
+
+        // The cubes and one-handed all have one, whatever the model can make of the scramble.
+        for event in ["3x3", "2x2", "7x7", "oh"] {
+            run_command(&mut app, event);
+            run_command(&mut app, "preview");
+            assert!(app.show_preview, "/preview must open on {}", event);
+            run_command(&mut app, "preview");
+        }
+
+        // Closing is never refused: the preview survives the switch that leaves its model behind.
+        run_command(&mut app, "3x3");
+        run_command(&mut app, "preview");
+        run_command(&mut app, "megaminx");
+        assert!(app.show_preview, "switching event does not close the popup");
+        run_command(&mut app, "preview");
+        assert!(!app.show_preview, "and the command still closes it");
+        assert!(app.status_msg.is_none(), "closing it is not a refusal");
+    }
+
+    #[test]
+    fn the_preview_trend_help_and_sessions_overlays_are_all_alternatives() {
+        let (mut app, _g) = test_app("cmd-preview-exclusive");
+        run_command(&mut app, "help");
+        run_command(&mut app, "preview");
+        assert!(app.show_preview, "/preview opens the cube");
+        assert!(!app.show_help, "and closes the help");
+
+        run_command(&mut app, "trend");
+        assert!(app.show_trend, "/trend opens the graph");
+        assert!(!app.show_preview, "and closes the cube");
+
+        run_command(&mut app, "preview");
+        assert!(app.show_preview);
+        assert!(!app.show_trend, "which the cube closes in turn");
+
+        run_command(&mut app, "sessions");
+        assert!(app.sessions_overlay.is_some(), "/sessions opens the listing");
+        assert!(!app.show_preview, "and closes the cube");
+
+        // The listing is modal, so it is closed before the cube can come back.
+        app.on_key(press(KeyCode::Esc));
+        run_command(&mut app, "preview");
+        assert!(app.show_preview);
         assert_eq!(app.sessions_overlay, None, "and the listing stays closed");
     }
 

@@ -26,7 +26,7 @@ Changed behavior arrives with updated tests. Same change set, no follow-up promi
 exceptions. The only change that may leave the suite untouched is one where nothing
 observable changed. Details in `claude-docs/testing.md`.
 
-**2. Separation of concerns, one responsibility per module.** The eight modules and their
+**2. Separation of concerns, one responsibility per module.** The nine modules and their
 single jobs:
 
 | Module | Responsibility |
@@ -35,49 +35,59 @@ single jobs:
 | `app/` | State machine: timer states, key handling, `/commands`, and the derived fields the UI reads |
 | `ui/` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
 | `scramble/` | Scramble generation in WCA notation, one generator per puzzle family |
+| `cube/` | Facelet cube state for the NxN events: what a scramble leaves on each sticker |
 | `stats.rs` | Pure statistics: trimmed averages, session summaries, session bests |
 | `cstimer.rs` | Pure conversion to and from csTimer's export format; no file IO, the commands do that |
 | `storage.rs` | Where the save file lives, and reading and writing it atomically |
 | `types.rs` | Shared vocabulary and the serde shape of the persisted file |
 
-Three of those are directories, each split along its own internal seam:
+Three of those are directories split along an internal seam, and a fourth, `cube/`, is one
+file until the solvers give it a second:
 
 | File | Responsibility |
 |---|---|
 | `app/mod.rs` | Timer state machine, key handling, tick, the derived fields the UI reads |
 | `app/commands.rs` | Command mode: the `/command` parser and every `cmd_*` handler |
-| `app/selection.rs` | Overlay state: the times cursor, the solve detail, the sessions picker, the help and trend toggles |
+| `app/inspection.rs` | The 15 second countdown: the judge calls, the penalty it earns, the keys it answers |
+| `app/selection.rs` | Overlay state: the times cursor, the solve detail, the sessions picker, the help, trend and preview toggles |
 | `app/progress.rs` | How the session is going: the trend window and the session-best celebration |
 | `app/repair.rs` | Save-file structural repair: `sanitize` and the id bookkeeping under it |
-| `app/testkit.rs` | Test scaffolding shared by the five, `#[cfg(test)]` only |
+| `app/testkit.rs` | Test scaffolding shared by the six, `#[cfg(test)]` only |
 | `ui/mod.rs` | `draw`, the header, the stats strip, the times list and the status line |
 | `ui/timer.rs` | The big countdown: `timer_view`, `draw_timer` and the block font |
-| `ui/overlay.rs` | The four popups: help, the session picker, the trend graph, and one solve in full |
+| `ui/overlay.rs` | The five popups: help, the session picker, the trend graph, the scramble preview, and one solve in full |
+| `ui/net.rs` | Pure net geometry: a `Cube` as colored block-glyph lines. No `Frame`, no `App` |
 | `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
 | `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
 | `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |
 
 No module reaches around another's API. `ui` reads `App` fields and never touches
 `Instant`, the filesystem, or `stats` (statistics are cached on `App` by `refresh_derived`
-because recomputing them in the 15 ms draw loop can hang on a large save file). `app` is
+because recomputing them in the 15 ms draw loop can hang on a large save file). The preview
+cube is cached the same way and for the same reason, by `refresh_preview` at every site that
+assigns the scramble: `cube/` is pure state that a scramble string feeds and `ui/net.rs`
+draws, and it never appears in `draw`. `app` is
 the only caller of `storage::save` and of `cstimer`, which opens no file of its own.
 Nothing outside `storage.rs` decides where data lives. `App`'s public surface is the whole
 of `app`: `crate::app::App` keeps every path it had before the directory split, and
 `main.rs` and `ui` are unaware there is more than one file behind it.
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
-rather than appending. Nothing in `src/` is over the line, but `app/mod.rs` sits at 492
-non-test lines with nothing to spare, so the next thing added to the state machine needs a
-cut first, not after. **The seam waiting there is the inspection cluster**: the five
-`INSPECTION_*` constants with `start_inspection`, `cancel_inspection`, `refresh_inspection`
-and `on_key_inspecting` behind them, which is the one part of the timer that has its own
-vocabulary. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391,
-`ui/mod.rs` at 380, `cstimer.rs` at 372 and `storage.rs` at 345, none of which has an
-obvious seam left, so treat growth past roughly 500 in any of them as the prompt to look
-for one. `app/progress.rs` is the most
-recent cut and it shows the shape to aim for, as `app/selection.rs` and `ui/timer.rs` did
-before it: the parent keeps one entry point per cluster (`note_best`, `expire_best_banner`,
-`on_key_times`, `draw_timer`) and the child keeps every constant and helper behind it.
+rather than appending. Nothing in `src/` is over the line. The inspection cut has landed, so
+the state machine has room again: `app/mod.rs` is at 454 non-test lines. `ui/overlay.rs` is
+now the file closest to the line at 456, then `app/mod.rs` at 454 and `app/commands.rs` at
+446, with `ui/mod.rs` at 384, `cstimer.rs` at 372, `storage.rs` at 345 and `cube/mod.rs` at
+319 behind them; the other two new files are small, `ui/net.rs` at 155 and
+`app/inspection.rs` at 80. **The seam waiting now is in `ui/overlay.rs`**: the trend cluster,
+meaning `TREND_PERCENTILE`, `TREND_TRIM_MIN`, `TREND_FLAT_PAD` and the `TrendPlot` arithmetic
+of `trend_top`, `trend_plot` and `trend_ticks` behind `draw_trend`, which is the one popup
+that computes a picture instead of laying text out. Nothing else has an obvious seam left, so
+treat growth past roughly 500 in any of them as the prompt to look for one.
+`app/inspection.rs` is the most recent cut and it shows the shape to aim for, as
+`app/progress.rs`, `app/selection.rs` and `ui/timer.rs` did before it: the parent keeps one
+entry point per cluster (`start_inspection`, `refresh_inspection`, `on_key_inspecting`,
+`note_best`, `on_key_times`, `draw_timer`) and the child keeps every constant and helper
+behind it.
 
 **3. Comments are single-line, always.** Never `/* */` blocks. Use `///` doc comments on
 items and `//!` at the top of a module, first letter capitalized. Use sparse `//` inline

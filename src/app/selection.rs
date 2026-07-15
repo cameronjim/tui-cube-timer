@@ -1,8 +1,8 @@
-//! Selection state: the times-list cursor and the four overlays, modal and not.
+//! Selection state: the times-list cursor and the five overlays, modal and not.
 //!
 //! None of this is timer state, so it lives beside the state machine in [`super`] rather than
 //! inside it. Every entry point here is reached from a key the state machine did not claim.
-//! The mutual exclusion between the three overlays that can be opened outright is enforced
+//! The mutual exclusion between the four overlays that can be opened outright is enforced
 //! here, where the state changes, rather than in the renderer.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -22,6 +22,7 @@ impl App {
         self.show_help = !self.show_help;
         if self.show_help {
             self.show_trend = false;
+            self.show_preview = false;
             self.sessions_overlay = None;
         }
     }
@@ -31,6 +32,17 @@ impl App {
         self.show_trend = !self.show_trend;
         if self.show_trend {
             self.show_help = false;
+            self.show_preview = false;
+            self.sessions_overlay = None;
+        }
+    }
+
+    /// Toggle the scramble preview, on the same terms as the trend graph it displaces.
+    pub(super) fn toggle_preview(&mut self) {
+        self.show_preview = !self.show_preview;
+        if self.show_preview {
+            self.show_help = false;
+            self.show_trend = false;
             self.sessions_overlay = None;
         }
     }
@@ -40,9 +52,10 @@ impl App {
     /// Esc uses the answer to decide whether it has anything left to do: with no popup open
     /// it goes on to clear the status line instead.
     pub(super) fn close_popups(&mut self) -> bool {
-        let was_open = self.show_help || self.show_trend;
+        let was_open = self.show_help || self.show_trend || self.show_preview;
         self.show_help = false;
         self.show_trend = false;
+        self.show_preview = false;
         was_open
     }
 
@@ -102,6 +115,7 @@ impl App {
             return;
         };
         self.scramble = self.current_session().solves[position].scramble.clone();
+        self.refresh_preview();
         self.solve_detail = None;
         // The overlay is numbered like the times list, where the newest solve is `count`.
         self.status(format!("scramble loaded from solve {}", count - index));
@@ -114,6 +128,7 @@ impl App {
         self.sessions_overlay = Some(self.active_index());
         self.show_help = false;
         self.show_trend = false;
+        self.show_preview = false;
     }
 
     /// Drive the modal sessions list: move the cursor, switch to a session, or close.
@@ -370,6 +385,28 @@ mod tests {
         assert!(!app.show_trend, "and the graph closes behind it");
     }
 
+    #[test]
+    fn the_preview_and_the_sessions_overlay_are_never_open_at_once() {
+        let (mut app, _g) = test_app("overlay-preview-exclusive");
+        app.show_preview = true;
+        app.open_sessions_overlay();
+        assert_eq!(app.sessions_overlay, Some(0), "the listing opens");
+        assert!(!app.show_preview, "and the preview closes behind it");
+
+        // And the other way: opening the preview displaces the two it can be opened over.
+        app.on_key(press(KeyCode::Esc));
+        app.show_help = true;
+        app.toggle_preview();
+        assert!(app.show_preview);
+        assert!(!app.show_help, "the help gives way to it");
+
+        app.toggle_preview();
+        app.show_trend = true;
+        app.toggle_preview();
+        assert!(app.show_preview);
+        assert!(!app.show_trend, "and so does the graph");
+    }
+
     // ------------------------------------------------------- the times cursor
 
     #[test]
@@ -608,6 +645,19 @@ mod tests {
         assert_eq!(last.scramble, "SCRAMBLE 2");
         assert_eq!(app.times_selected, 0);
         assert_ne!(app.scramble, "SCRAMBLE 2", "and a fresh scramble follows it");
+    }
+
+    #[test]
+    fn recalling_a_scramble_rebuilds_the_preview_from_it() {
+        let (mut app, _g) = test_app("detail-recall-preview");
+        add_solve_with(&mut app, 10_000, "R U R' U'");
+        // A cube belonging to neither scramble, so a cache left alone would fail this.
+        app.preview = Some(crate::cube::Cube::solved(3));
+
+        app.on_key(press(KeyCode::Enter));
+        app.on_key(press(KeyCode::Char('r')));
+        assert_eq!(app.scramble, "R U R' U'");
+        assert_preview_is_fresh(&app, "after recalling a solve's scramble");
     }
 
     #[test]

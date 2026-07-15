@@ -30,6 +30,27 @@ being plain about it:
   exactly the same caveat. The WCA scrambles it the same way; the event is the
   hand you are not using, not the cube.
 
+## Seeing the cube first
+
+`/preview` opens the scramble as a cube: the six faces unfolded into a flat net,
+each sticker the colour it would be once you finished turning. It is the state
+the scramble in front of you leads to, not the state you are looking at, so it
+is a way to check your turning after the fact or to plan a cross before you
+start the timer. `/preview` again closes it, and so does `Esc`. It shares its
+slot with the help, the trend graph and the session picker: opening any of those
+closes it.
+
+The preview covers 2x2 through 7x7 and one-handed, which are the events
+Cubetimer has a cube model for. Pyraminx, Skewb, Megaminx, Square-1 and Clock
+say `no preview for <event> yet` and keep their scrambles unchanged; each is
+waiting on a model of its own shape.
+
+On a terminal too short for a full sized net, the preview halves its height by
+drawing two sticker rows per line, which is the same picture at half scale. It
+needs the same width either way, so on a window narrower than the net, or shorter
+than even the half scale one, it says the terminal is too small rather than
+drawing a cube you could not read.
+
 ## Two things worth knowing
 
 Megaminx scrambles run to seven lines, and the scramble area at the top of the

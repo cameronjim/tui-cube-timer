@@ -3,9 +3,11 @@
 //! Every value shown is already on `App`, including the statistics: this runs on the 15 ms
 //! tick, so it reads and never computes. The geometry lives in [`layout`], and is saturating
 //! throughout so tiny terminals degrade instead of panicking. The big countdown in the middle
-//! is [`timer`], and the popups drawn on top of the frame live in [`overlay`].
+//! is [`timer`], the popups drawn on top of the frame live in [`overlay`], and the unfolded cube
+//! one of them draws is laid out by [`net`].
 
 mod layout;
+mod net;
 mod overlay;
 mod timer;
 
@@ -86,6 +88,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // One overlay at a time, and the detail popup is the one the user just asked for.
     if let Some(index) = app.solve_detail {
         overlay::draw_detail(frame, app, index, area);
+    } else if app.show_preview {
+        overlay::draw_preview(frame, app, area);
     } else if let Some(cursor) = app.sessions_overlay {
         overlay::draw_sessions(frame, app, cursor, area);
     } else if app.show_trend {

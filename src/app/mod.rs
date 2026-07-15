@@ -1,11 +1,12 @@
 //! Timer state machine and key handling; `ui` renders only from [`App`] fields refreshed here.
 //!
-//! The four clusters that answer their own question live beside this file: [`commands`] runs
-//! the `/command` line, [`selection`] owns the times cursor and the two list overlays,
-//! [`progress`] owns the trend and the session-best celebration, and [`repair`] makes a
-//! parsed save file internally consistent.
+//! The five clusters that answer their own question live beside this file: [`commands`] runs
+//! the `/command` line, [`inspection`] runs the fifteen second countdown, [`selection`] owns
+//! the times cursor and the list overlays, [`progress`] owns the trend and the session-best
+//! celebration, and [`repair`] makes a parsed save file internally consistent.
 
 mod commands;
+mod inspection;
 mod progress;
 mod repair;
 mod selection;
@@ -26,16 +27,6 @@ use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve};
 const ARM_THRESHOLD: Duration = Duration::from_millis(300);
 /// After a solve, space is ignored this long (csTimer-style guard against bounced keys).
 const STOP_COOLDOWN: Duration = Duration::from_millis(300);
-/// Inspection length in seconds.
-const INSPECTION_SECS: i64 = 15;
-/// Elapsed inspection past this (ms) earns a +2.
-const INSPECTION_PLUS2_MS: u128 = 15_000;
-/// Elapsed inspection past this (ms) earns a DNF.
-const INSPECTION_DNF_MS: u128 = 17_000;
-/// First WCA judge call: the "8 seconds" warning.
-const INSPECTION_CALL_8_MS: u128 = 8_000;
-/// Second WCA judge call: the "12 seconds" warning.
-const INSPECTION_CALL_12_MS: u128 = 12_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerState {
@@ -64,6 +55,11 @@ pub struct App {
     ///
     /// Non-modal like [`App::show_help`] and mutually exclusive with it and the sessions picker.
     pub show_trend: bool,
+    /// Whether the scramble preview is open over the frame.
+    ///
+    /// Non-modal on the same terms as [`App::show_trend`], and one of the same set of
+    /// alternatives: opening any of them closes the rest.
+    pub show_preview: bool,
     /// Open sessions overlay, holding the cursor's index into `save.sessions`.
     ///
     /// Mutually exclusive with [`App::show_help`] and [`App::show_trend`]; the solve detail wins
@@ -98,6 +94,11 @@ pub struct App {
     /// The session-best celebration currently on screen, cleared after
     /// [`BEST_BANNER`](progress::BEST_BANNER).
     pub best_banner: Option<String>,
+    /// The cube the scramble on screen produces, cached by [`App::refresh_preview`].
+    ///
+    /// None for the events with no model yet, so the overlay says so rather than drawing an
+    /// empty frame.
+    pub preview: Option<crate::cube::Cube>,
 
     // --- internal bookkeeping (not part of the ui contract) ---
     /// Inspection start, kept while armed so an aborted arm restores the countdown.
@@ -130,6 +131,7 @@ impl App {
             status_msg: None,
             show_help: false,
             show_trend: false,
+            show_preview: false,
             sessions_overlay: None,
             times_selected: 0,
             solve_detail: None,
@@ -143,12 +145,14 @@ impl App {
             bests: SessionBests::default(),
             trend: Vec::new(),
             best_banner: None,
+            preview: None,
             inspection_start: None,
             inert_key: None,
             stopped_at: None,
             banner_since: None,
         };
         app.refresh_derived();
+        app.refresh_preview();
         app
     }
 
@@ -203,6 +207,16 @@ impl App {
     fn new_scramble(&mut self) {
         self.scramble = scramble::generate(self.puzzle());
         self.times_selected = 0;
+        self.refresh_preview();
+    }
+
+    /// Rebuild the cube [`App::preview`] holds from the scramble now on screen.
+    ///
+    /// Every path that assigns `scramble` calls this, whether the overlay is open or not: a
+    /// cube is six small vectors and a walk of the scramble, which is cheap enough to pay for
+    /// unconditionally and far too much to pay for in the 15 ms draw loop.
+    fn refresh_preview(&mut self) {
+        self.preview = crate::cube::Cube::for_scramble(self.puzzle(), &self.scramble);
     }
 
     /// Persist to disk. Never panics; failures surface in `status_msg`.
@@ -214,26 +228,6 @@ impl App {
 
     fn status<S: Into<String>>(&mut self, msg: S) {
         self.status_msg = Some(msg.into());
-    }
-
-    fn start_inspection(&mut self) {
-        let now = Instant::now();
-        self.state = TimerState::Inspecting { started: now };
-        self.inspection_start = Some(now);
-        self.pending_inspection_penalty = Penalty::None;
-        self.inspection_remaining = Some(INSPECTION_SECS);
-        self.inspection_stage = 0;
-        self.display_millis = 0;
-        self.status_msg = None;
-    }
-
-    fn cancel_inspection(&mut self) {
-        self.state = TimerState::Idle;
-        self.inspection_start = None;
-        self.inspection_remaining = None;
-        self.pending_inspection_penalty = Penalty::None;
-        self.inspection_stage = 0;
-        self.display_millis = 0;
     }
 
     fn arm(&mut self, from_inspection: bool) {
@@ -323,27 +317,6 @@ impl App {
                 self.display_millis = started.elapsed().as_millis() as u64;
             }
         }
-    }
-
-    fn refresh_inspection(&mut self, started: Instant) {
-        let elapsed = started.elapsed().as_millis();
-        self.inspection_remaining = Some(INSPECTION_SECS - (elapsed / 1000) as i64);
-        self.pending_inspection_penalty = if elapsed > INSPECTION_DNF_MS {
-            Penalty::Dnf
-        } else if elapsed > INSPECTION_PLUS2_MS {
-            Penalty::Plus2
-        } else {
-            Penalty::None
-        };
-
-        // The judge calls are silent: `ui` reads the stage for the countdown's colour and caption.
-        self.inspection_stage = if elapsed >= INSPECTION_CALL_12_MS {
-            2
-        } else if elapsed >= INSPECTION_CALL_8_MS {
-            1
-        } else {
-            0
-        };
     }
 
     // -------------------------------------------------------------------- key
@@ -457,17 +430,6 @@ impl App {
         }
     }
 
-    fn on_key_inspecting(&mut self, key: KeyEvent) {
-        if key.kind != KeyEventKind::Press {
-            return;
-        }
-        match key.code {
-            KeyCode::Char(' ') => self.arm(true),
-            KeyCode::Esc => self.cancel_inspection(),
-            _ => {}
-        }
-    }
-
     fn on_key_armed(&mut self, key: KeyEvent, from_inspection: bool) {
         match key.kind {
             KeyEventKind::Release => {
@@ -495,12 +457,6 @@ mod tests {
     use super::testkit::*;
     use super::*;
     use std::fs;
-
-    /// Backdate the running inspection so the next tick sees `started` as its beginning.
-    fn set_inspection_started(app: &mut App, started: Instant) {
-        app.state = TimerState::Inspecting { started };
-        app.inspection_start = Some(started);
-    }
 
     // --------------------------------------------------------- idle -> arming
 
@@ -609,256 +565,6 @@ mod tests {
         app.on_key(press(SPACE));
         app.on_key(press(KeyCode::Esc));
         assert_eq!(app.state, TimerState::Idle);
-    }
-
-    // ------------------------------------------------------------- inspection
-
-    #[test]
-    fn inspection_under_fifteen_seconds_has_no_penalty() {
-        let (mut app, _g) = test_app("insp-clean");
-        app.state = TimerState::Inspecting {
-            started: ago(Duration::from_secs(10)),
-        };
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::None);
-        assert_eq!(app.inspection_remaining, Some(5));
-    }
-
-    #[test]
-    fn sixteen_seconds_of_inspection_is_a_pending_plus_two() {
-        let (mut app, _g) = test_app("insp-plus2");
-        app.state = TimerState::Inspecting {
-            started: ago(Duration::from_secs(16)),
-        };
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Plus2);
-        assert_eq!(app.inspection_remaining, Some(-1));
-    }
-
-    #[test]
-    fn eighteen_seconds_of_inspection_is_a_pending_dnf() {
-        let (mut app, _g) = test_app("insp-dnf");
-        app.state = TimerState::Inspecting {
-            started: ago(Duration::from_secs(18)),
-        };
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Dnf);
-        assert_eq!(app.inspection_remaining, Some(-3));
-    }
-
-    #[test]
-    fn esc_cancels_inspection_and_clears_the_pending_penalty() {
-        let (mut app, _g) = test_app("insp-cancel");
-        app.state = TimerState::Inspecting {
-            started: ago(Duration::from_secs(16)),
-        };
-        app.inspection_start = Some(ago(Duration::from_secs(16)));
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Plus2);
-
-        app.on_key(press(KeyCode::Esc));
-        assert_eq!(app.state, TimerState::Idle);
-        assert_eq!(app.pending_inspection_penalty, Penalty::None);
-        assert_eq!(app.inspection_remaining, None);
-        assert!(app.inspection_start.is_none());
-    }
-
-    #[test]
-    fn aborted_arm_from_inspection_restores_the_original_countdown() {
-        let (mut app, _g) = test_app("insp-restore");
-        let started = ago(ms(5_500));
-        app.state = TimerState::Inspecting { started };
-        app.inspection_start = Some(started);
-        app.on_tick();
-        assert_eq!(app.inspection_remaining, Some(10));
-
-        app.on_key(press(SPACE));
-        assert!(matches!(
-            app.state,
-            TimerState::Armed {
-                from_inspection: true,
-                ..
-            }
-        ));
-
-        // Released too soon: back to inspecting, countdown *not* restarted.
-        app.on_key(release(SPACE));
-        match app.state {
-            TimerState::Inspecting { started: s } => assert_eq!(s, started),
-            other => panic!("expected Inspecting, got {:?}", other),
-        }
-        app.on_tick();
-        assert_eq!(app.inspection_remaining, Some(10));
-    }
-
-    #[test]
-    fn ticking_while_armed_from_inspection_keeps_the_countdown_running() {
-        let (mut app, _g) = test_app("armed-tick");
-        let started = ago(Duration::from_secs(16));
-        app.inspection_start = Some(started);
-        app.state = TimerState::Armed {
-            since: Instant::now(),
-            from_inspection: true,
-        };
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Plus2);
-    }
-
-    #[test]
-    fn a_solve_after_late_inspection_carries_the_plus_two() {
-        let (mut app, _g) = test_app("carry-plus2");
-        let started = ago(Duration::from_secs(16));
-        app.state = TimerState::Inspecting { started };
-        app.inspection_start = Some(started);
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Plus2);
-
-        app.on_key(press(SPACE));
-        app.state = TimerState::Armed {
-            since: ago(ms(350)),
-            from_inspection: true,
-        };
-        app.on_key(release(SPACE));
-        assert!(matches!(app.state, TimerState::Timing { .. }));
-        assert_eq!(
-            app.pending_inspection_penalty,
-            Penalty::Plus2,
-            "starting the timer must not clear the inspection penalty"
-        );
-
-        app.state = TimerState::Timing {
-            started: ago(ms(12_340)),
-        };
-        app.on_key(press(SPACE));
-
-        let solve = app.current_session().solves.last().expect("solve recorded");
-        assert_eq!(solve.penalty, Penalty::Plus2);
-        assert!(
-            (12_340..13_500).contains(&solve.millis),
-            "unexpected raw time {}",
-            solve.millis
-        );
-        assert_eq!(
-            app.pending_inspection_penalty,
-            Penalty::None,
-            "penalty is consumed by the solve"
-        );
-    }
-
-    #[test]
-    fn a_solve_after_a_dnf_inspection_carries_the_dnf() {
-        let (mut app, _g) = test_app("carry-dnf");
-        let started = ago(Duration::from_secs(18));
-        app.state = TimerState::Inspecting { started };
-        app.inspection_start = Some(started);
-        app.on_tick();
-        assert_eq!(app.pending_inspection_penalty, Penalty::Dnf);
-
-        app.on_key(press(SPACE));
-        app.state = TimerState::Armed {
-            since: ago(ms(400)),
-            from_inspection: true,
-        };
-        app.on_key(release(SPACE));
-        app.state = TimerState::Timing {
-            started: ago(ms(8_000)),
-        };
-        app.on_key(press(SPACE));
-
-        let solve = app.current_session().solves.last().expect("solve recorded");
-        assert_eq!(solve.penalty, Penalty::Dnf);
-        assert_eq!(solve.effective_millis(), None);
-    }
-
-    // ---------------------------------------------------------- judge calls
-
-    #[test]
-    fn the_stage_advances_at_eight_and_twelve_seconds() {
-        let (mut app, _g) = test_app("insp-stage");
-        app.save.settings.inspection = true;
-        app.on_key(press(SPACE));
-        app.on_key(release(SPACE));
-        assert!(matches!(app.state, TimerState::Inspecting { .. }));
-        assert_eq!(app.inspection_stage, 0, "inspection starts before the first call");
-
-        set_inspection_started(&mut app, ago(ms(7_900)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 0, "still under eight seconds");
-
-        set_inspection_started(&mut app, ago(ms(8_100)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 1, "the eight second call");
-
-        set_inspection_started(&mut app, ago(ms(11_500)));
-        app.on_tick();
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 1, "later ticks stay in the same stage");
-
-        set_inspection_started(&mut app, ago(ms(12_100)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 2, "the twelve second call");
-
-        set_inspection_started(&mut app, ago(ms(14_000)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 2, "there is no third call");
-    }
-
-    #[test]
-    fn the_stage_keeps_advancing_while_armed_from_inspection() {
-        let (mut app, _g) = test_app("insp-stage-armed");
-        app.inspection_start = Some(ago(ms(8_200)));
-        app.state = TimerState::Armed {
-            since: Instant::now(),
-            from_inspection: true,
-        };
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 1, "the clock is still running while armed");
-    }
-
-    #[test]
-    fn cancelling_inspection_resets_the_stage() {
-        let (mut app, _g) = test_app("insp-stage-reset");
-        app.save.settings.inspection = true;
-        set_inspection_started(&mut app, ago(ms(12_500)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 2);
-
-        app.on_key(press(KeyCode::Esc));
-        assert_eq!(app.state, TimerState::Idle);
-        assert_eq!(app.inspection_stage, 0);
-
-        // A fresh inspection starts from stage 0 and climbs again.
-        app.on_key(press(SPACE));
-        app.on_key(release(SPACE));
-        assert!(matches!(app.state, TimerState::Inspecting { .. }));
-        assert_eq!(app.inspection_stage, 0);
-        set_inspection_started(&mut app, ago(ms(8_500)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 1);
-    }
-
-    #[test]
-    fn starting_the_timer_clears_the_inspection_stage() {
-        let (mut app, _g) = test_app("insp-stage-clear");
-        app.save.settings.inspection = true;
-        set_inspection_started(&mut app, ago(ms(9_000)));
-        app.on_tick();
-        assert_eq!(app.inspection_stage, 1);
-
-        app.on_key(press(SPACE));
-        app.state = TimerState::Armed {
-            since: ago(ms(350)),
-            from_inspection: true,
-        };
-        app.on_key(release(SPACE));
-        assert!(matches!(app.state, TimerState::Timing { .. }));
-        assert_eq!(app.inspection_stage, 0, "the calls belong to inspection only");
-
-        app.state = TimerState::Timing {
-            started: ago(ms(3_000)),
-        };
-        app.on_key(press(SPACE));
-        assert_eq!(app.inspection_stage, 0);
     }
 
     // ----------------------------------------------------------- timing/stop
@@ -1108,6 +814,29 @@ mod tests {
         assert!(!app.show_trend, "and the graph gives way to it");
     }
 
+    #[test]
+    fn esc_closes_the_preview_before_it_clears_the_status() {
+        let (mut app, _g) = test_app("key-esc-preview");
+        app.show_preview = true;
+        app.status_msg = Some("something".to_string());
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_preview);
+        assert_eq!(app.status_msg.as_deref(), Some("something"));
+
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn h_opens_the_help_over_an_open_preview() {
+        let (mut app, _g) = test_app("key-h-preview");
+        app.show_preview = true;
+        app.on_key(press(KeyCode::Char('h')));
+        assert!(app.show_help, "'h' still reaches the help");
+        assert!(!app.show_preview, "and the preview gives way to it");
+    }
+
     // ------------------------------------------------------------ constructor
 
     #[test]
@@ -1271,6 +1000,72 @@ mod tests {
         assert_eq!(app.current_session().puzzle, Puzzle::Megaminx, "retyped in place");
         assert_eq!(app.bests.single, None, "and it still has no times");
         assert_cache_is_fresh(&app, "after retyping onto Megaminx");
+    }
+
+    // ---------------------------------------------------------- preview cache
+
+    /// A cube that belongs to no scramble, planted to prove the cache is rebuilt and not left.
+    fn plant_stale_preview(app: &mut App) {
+        app.preview = Some(crate::cube::Cube::solved(3));
+    }
+
+    #[test]
+    fn the_preview_cache_follows_the_scramble_on_screen() {
+        let (mut app, _g) = test_app("cache-preview");
+        assert_preview_is_fresh(&app, "on a brand new app");
+
+        plant_stale_preview(&mut app);
+        app.on_key(press(KeyCode::Char('n')));
+        assert_preview_is_fresh(&app, "after 'n'");
+
+        plant_stale_preview(&mut app);
+        perform_solve(&mut app);
+        assert_preview_is_fresh(&app, "after a solve");
+    }
+
+    #[test]
+    fn a_generated_scramble_leaves_the_cube_on_screen_genuinely_scrambled() {
+        // The cache and the model together: `refresh_preview` builds a cube of the right size
+        // and the generator hands it a scramble that actually turns it.
+        let (mut app, _g) = test_app("preview-scrambled");
+        for (event, n) in [("3x3", 3u8), ("oh", 3), ("7x7", 7)] {
+            run_command(&mut app, event);
+            let cube = app
+                .preview
+                .as_ref()
+                .unwrap_or_else(|| panic!("/{event} must leave a cube to preview"));
+            assert_eq!(cube.n(), n, "/{event} previews at the wrong size");
+            assert!(
+                !cube.is_solved(),
+                "a generated {event} scramble cannot leave the cube solved"
+            );
+        }
+
+        run_command(&mut app, "megaminx");
+        assert!(
+            app.preview.is_none(),
+            "megaminx has no model to build a cube from yet"
+        );
+    }
+
+    #[test]
+    fn the_preview_cache_follows_every_session_and_puzzle_change() {
+        let (mut app, _g) = test_app("cache-preview-session");
+        // Navigating, forking, switching back, an event with no model, and a session deleted
+        // out from under the scramble it was showing.
+        for line in [
+            "2x2",
+            "new evening",
+            "session 1",
+            "megaminx",
+            "7x7",
+            "new drills",
+            "delsession",
+        ] {
+            plant_stale_preview(&mut app);
+            run_command(&mut app, line);
+            assert_preview_is_fresh(&app, &format!("after /{}", line));
+        }
     }
 
     #[test]
