@@ -1,6 +1,6 @@
-//! Pure statistics helpers: WCA trimmed averages, session summaries, personal bests.
+//! Pure statistics helpers: WCA trimmed averages, session summaries, session bests.
 
-use crate::types::{Session, Solve};
+use crate::types::Solve;
 
 use std::cmp::Ordering;
 
@@ -179,11 +179,11 @@ pub fn session_stats(solves: &[Solve]) -> SessionStats {
     }
 }
 
-/// All-time personal bests.
+/// The best each window has ever been within one session. The default is an empty session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PersonalBests {
+pub struct SessionBests {
     pub single: Option<u64>,
-    /// Best untrimmed mean of three anywhere in a session.
+    /// Best untrimmed mean of three anywhere in the session.
     pub mo3: Option<u64>,
     pub ao5: Option<u64>,
     pub ao12: Option<u64>,
@@ -191,38 +191,22 @@ pub struct PersonalBests {
     pub ao1000: Option<u64>,
 }
 
-/// Keep the smaller of `slot` and `candidate`.
-fn keep_min(slot: &mut Option<u64>, candidate: Option<u64>) {
-    if let Some(c) = candidate {
-        if slot.is_none_or(|cur| c < cur) {
-            *slot = Some(c);
-        }
+/// The best single and the best rolling window of each size over one session's solves.
+pub fn session_bests(solves: &[Solve]) -> SessionBests {
+    SessionBests {
+        single: solves.iter().filter_map(|s| s.effective_millis()).min(),
+        mo3: best_mean_of(3, solves),
+        ao5: best_average_of(5, solves),
+        ao12: best_average_of(12, solves),
+        ao100: best_average_of(100, solves),
+        ao1000: best_average_of(1000, solves),
     }
-}
-
-/// All-time PBs across the given sessions; rolling windows never span a session boundary.
-pub fn personal_bests(sessions: &[&Session]) -> PersonalBests {
-    let mut pb = PersonalBests::default();
-    for session in sessions {
-        let single = session
-            .solves
-            .iter()
-            .filter_map(|s| s.effective_millis())
-            .min();
-        keep_min(&mut pb.single, single);
-        keep_min(&mut pb.mo3, best_mean_of(3, &session.solves));
-        keep_min(&mut pb.ao5, best_average_of(5, &session.solves));
-        keep_min(&mut pb.ao12, best_average_of(12, &session.solves));
-        keep_min(&mut pb.ao100, best_average_of(100, &session.solves));
-        keep_min(&mut pb.ao1000, best_average_of(1000, &session.solves));
-    }
-    pb
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Penalty, Puzzle};
+    use crate::types::Penalty;
 
     /// A clean solve of `ms` milliseconds.
     fn s(ms: u64) -> Solve {
@@ -252,16 +236,6 @@ mod tests {
 
     fn solves(times: &[u64]) -> Vec<Solve> {
         times.iter().map(|&t| s(t)).collect()
-    }
-
-    fn session(id: u64, times: &[u64]) -> Session {
-        Session {
-            id,
-            name: format!("s{}", id),
-            puzzle: Puzzle::Cube3,
-            solves: solves(times),
-            created_at: 0,
-        }
     }
 
     // ---- trim counts -----------------------------------------------------
@@ -605,70 +579,61 @@ mod tests {
         assert_eq!(st.valid_count, 5);
     }
 
-    // ---- personal bests --------------------------------------------------
+    // ---- session bests ---------------------------------------------------
 
     #[test]
-    fn personal_bests_empty_inputs() {
-        let pb = personal_bests(&[]);
-        assert_eq!(pb, PersonalBests::default());
-        assert_eq!(pb.single, None);
-        assert_eq!(pb.mo3, None);
-        assert_eq!(pb.ao5, None);
-        assert_eq!(pb.ao12, None);
-        assert_eq!(pb.ao100, None);
-        assert_eq!(pb.ao1000, None);
-
-        let empty = session(1, &[]);
-        let pb = personal_bests(&[&empty]);
-        assert_eq!(pb.single, None);
-        assert_eq!(pb.mo3, None);
-        assert_eq!(pb.ao5, None);
+    fn session_bests_of_an_empty_session() {
+        let b = session_bests(&[]);
+        assert_eq!(b, SessionBests::default());
+        assert_eq!(b.single, None);
+        assert_eq!(b.mo3, None);
+        assert_eq!(b.ao5, None);
+        assert_eq!(b.ao12, None);
+        assert_eq!(b.ao100, None);
+        assert_eq!(b.ao1000, None);
     }
 
     #[test]
-    fn personal_bests_across_sessions() {
-        // Session 1 holds the PB single; session 2 holds the PB ao5.
-        let a = session(1, &[5_000, 30_000, 30_000, 30_000, 30_000, 30_000]);
-        let b = session(2, &[9_000, 10_000, 11_000, 12_000, 13_000]);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(5_000));
-        // a's best ao5 window is 30.000; b's is mean(10,11,12) = 11.000.
-        assert_eq!(pb.ao5, Some(11_000));
-        assert_eq!(pb.ao12, None);
-        assert_eq!(pb.ao100, None);
+    fn session_bests_are_the_best_window_not_the_last_one() {
+        // The fast block is early, so a tail-only reading would report 30.000 for the ao5.
+        let v = solves(&[
+            9_000, 10_000, 11_000, 12_000, 13_000, 30_000, 30_000, 30_000, 30_000, 30_000,
+        ]);
+        let b = session_bests(&v);
+        assert_eq!(b.single, Some(9_000));
+        // The best ao5 window trims 9.000 and 13.000, leaving mean(10, 11, 12).
+        assert_eq!(b.ao5, Some(11_000));
+        assert_eq!(b.ao12, None);
+        assert_eq!(b.ao100, None);
+        assert_eq!(average_of(5, &v), AvgResult::Time(30_000));
     }
 
     #[test]
-    fn personal_bests_windows_do_not_span_sessions() {
-        // Each session alone is too short for an ao5; combined they would be long enough.
-        let a = session(1, &[10_000, 10_000, 10_000]);
-        let b = session(2, &[10_000, 10_000, 10_000]);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(10_000));
-        assert_eq!(pb.ao5, None);
+    fn session_bests_need_the_whole_window_in_the_session() {
+        // Three solves is one short of an ao5 and exactly enough for an mo3.
+        let b = session_bests(&solves(&[10_000, 10_000, 10_000]));
+        assert_eq!(b.single, Some(10_000));
+        assert_eq!(b.mo3, Some(10_000));
+        assert_eq!(b.ao5, None);
     }
 
     #[test]
-    fn personal_bests_ao12_and_ao100() {
-        let times12: Vec<u64> = (1..=12).map(|i| i * 1_000).collect();
-        let times100: Vec<u64> = (1..=100).map(|i| i * 1_000).collect();
-        let a = session(1, &times12);
-        let b = session(2, &times100);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(1_000));
-        // b's best ao12 window is its first 12 solves == a's ao12.
+    fn session_bests_ao12_and_ao100() {
+        let times: Vec<u64> = (1..=100).map(|i| i * 1_000).collect();
+        let b = session_bests(&solves(&times));
+        assert_eq!(b.single, Some(1_000));
+        // The first twelve solves are the fastest twelve, so they are the best ao12.
         let expected_ao12: u64 = (2..=11).map(|i| i * 1_000).sum::<u64>() / 10;
-        assert_eq!(pb.ao12, Some(expected_ao12));
+        assert_eq!(b.ao12, Some(expected_ao12));
         let expected_ao100: u64 = (6..=95).map(|i| i * 1_000).sum::<u64>() / 90;
-        assert_eq!(pb.ao100, Some(expected_ao100));
+        assert_eq!(b.ao100, Some(expected_ao100));
+        assert_eq!(b.ao1000, None);
     }
 
     #[test]
-    fn personal_bests_ignores_dnf_singles() {
-        let mut a = session(1, &[20_000]);
-        a.solves.push(dnf(1_000)); // fastest raw time, but a DNF
-        let pb = personal_bests(&[&a]);
-        assert_eq!(pb.single, Some(20_000));
+    fn session_bests_ignores_dnf_singles() {
+        let v = vec![s(20_000), dnf(1_000)]; // the fastest raw time is a DNF
+        assert_eq!(session_bests(&v).single, Some(20_000));
     }
 
     // ---- mo3, the untrimmed mean of the last n ---------------------------
@@ -785,39 +750,34 @@ mod tests {
         assert_eq!(session_stats(&v).ao1000, AvgResult::Time(expected));
     }
 
-    // ---- personal bests for the new fields -------------------------------
+    // ---- session bests for the mo3 and ao1000 fields ---------------------
 
     #[test]
-    fn personal_bests_mo3_across_sessions() {
-        // Session 2 holds the best mean of three.
-        let a = session(1, &[20_000, 20_000, 20_000]);
-        let b = session(2, &[9_000, 10_000, 11_000, 30_000]);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(9_000));
-        assert_eq!(pb.mo3, Some(10_000));
-        assert_eq!(pb.ao1000, None);
+    fn session_bests_mo3_goes_through_the_untrimmed_mean() {
+        // A DNF poisons every window it sits in, so the best mo3 is three clean solves.
+        let v = vec![
+            s(9_000),
+            dnf(1_000),
+            s(10_000),
+            s(11_000),
+            s(12_000),
+            s(30_000),
+        ];
+        let b = session_bests(&v);
+        assert_eq!(b.single, Some(9_000));
+        assert_eq!(b.mo3, Some(11_000));
     }
 
     #[test]
-    fn personal_bests_mo3_windows_do_not_span_sessions() {
-        // Two solves each; only a combined slice would reach three.
-        let a = session(1, &[10_000, 10_000]);
-        let b = session(2, &[10_000, 10_000]);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(10_000));
-        assert_eq!(pb.mo3, None);
-    }
+    fn session_bests_ao1000_needs_a_thousand_solves_in_the_one_session() {
+        let times: Vec<u64> = (1..=999).map(|i| i * 100).collect();
+        assert_eq!(session_bests(&solves(&times)).ao1000, None);
 
-    #[test]
-    fn personal_bests_ao1000_across_sessions() {
-        let slow: Vec<u64> = (1..=1_000).map(|i| i * 1_000).collect();
-        let fast: Vec<u64> = (1..=1_000).map(|i| i * 100).collect();
-        let a = session(1, &slow);
-        let b = session(2, &fast);
-        let pb = personal_bests(&[&a, &b]);
-        assert_eq!(pb.single, Some(100));
-        assert_eq!(pb.mo3, Some((100 + 200 + 300) / 3));
+        let times: Vec<u64> = (1..=1_000).map(|i| i * 100).collect();
+        let b = session_bests(&solves(&times));
+        assert_eq!(b.single, Some(100));
+        assert_eq!(b.mo3, Some((100 + 200 + 300) / 3));
         let expected: u64 = (51..=950).map(|i| i * 100).sum::<u64>() / 900;
-        assert_eq!(pb.ao1000, Some(expected));
+        assert_eq!(b.ao1000, Some(expected));
     }
 }

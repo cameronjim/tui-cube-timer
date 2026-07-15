@@ -1,7 +1,7 @@
 # Cubetimer algorithms
 
 This document covers the maths Cubetimer implements: WCA trimmed averages, untrimmed means,
-rolling bests and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`),
+rolling bests and session bests (`src/stats.rs`), scramble generation (`src/scramble/`),
 the inspection penalty thresholds and judge calls (`src/app/mod.rs`), and the csTimer
 interchange format (`src/cstimer.rs`). Every claim here describes the code as it stands,
 including the places where Cubetimer approximates the official rules rather than matching
@@ -198,7 +198,7 @@ never depends on the size of the average.
 
 ---
 
-## Rolling bests and personal bests
+## Rolling bests and session bests
 
 `best_average_of(n, solves)` slides an `n`-wide window across the whole session and keeps
 the smallest valid average:
@@ -218,13 +218,13 @@ instead of nothing. If no window ever produced a time, the answer is `None`.
 Note that this calls `average_window` directly rather than `average_of`, so each window is
 averaged on its own terms; the "last n solves" tail logic does not apply. Complexity is
 `O((L - n + 1) · n log n)` for `L` solves, dominated by re-sorting each window, and
-`personal_bests` pays it once per session of the puzzle.
+`session_bests` pays it once per refresh.
 
 That cost is why the result is cached on `App` rather than computed in the renderer.
-An earlier version called `personal_bests` from `draw`, which put an unbounded walk over
-every solve the user has ever done inside a loop that runs every 15 ms; a large enough save
-file made the frame budget the binding constraint and the app unresponsive. `App::stats`
-and `App::pbs` now hold the answers and `App::refresh_derived` recomputes them at the
+An earlier version computed the bests from `draw`, which put an unbounded walk over the
+whole solve list inside a loop that runs every 15 ms; a large enough save file made the
+frame budget the binding constraint and the app unresponsive. `App::stats` and
+`App::bests` now hold the answers and `App::refresh_derived` recomputes them at the
 handful of moments a number can change, which is at most once per solve. See
 [architecture.md](architecture.md) for where those calls sit. If a session ever grows large
 enough that even that is slow, the fix is memoisation keyed on solve count, not a cleverer
@@ -239,33 +239,40 @@ that `mean` and `mo3` are different things despite both being untrimmed: `mean` 
 whole session and simply skips DNFs, while `mo3` covers the last three solves and is
 poisoned by one.
 
-`personal_bests` computes all-time bests across a set of sessions:
+`session_bests` bundles the five rolling bests with the best single, over one solve list:
 
 ```rust
-for session in sessions {
-    keep_min(&mut pb.single, session.solves.iter().filter_map(|s| s.effective_millis()).min());
-    keep_min(&mut pb.mo3,    best_mean_of(3, &session.solves));
-    keep_min(&mut pb.ao5,    best_average_of(5, &session.solves));
-    keep_min(&mut pb.ao12,   best_average_of(12, &session.solves));
-    keep_min(&mut pb.ao100,  best_average_of(100, &session.solves));
-    keep_min(&mut pb.ao1000, best_average_of(1000, &session.solves));
+pub fn session_bests(solves: &[Solve]) -> SessionBests {
+    SessionBests {
+        single: solves.iter().filter_map(|s| s.effective_millis()).min(),
+        mo3:    best_mean_of(3, solves),
+        ao5:    best_average_of(5, solves),
+        ao12:   best_average_of(12, solves),
+        ao100:  best_average_of(100, solves),
+        ao1000: best_average_of(1000, solves),
+    }
 }
 ```
 
-`pb.mo3` is the one entry that goes through `best_mean_of` rather than `best_average_of`,
-so a personal best mo3 is a stretch of three clean solves and can never contain a DNF. The
-ao1000 entry is the expensive one, which is why `best_average_of` returns early when the
-session is shorter than the window: most sessions never reach a thousand solves and pay
-nothing for the row being on screen.
+`mo3` is the one entry that goes through `best_mean_of` rather than `best_average_of`, so a
+best mo3 is a stretch of three clean solves and can never contain a DNF. The ao1000 entry is
+the expensive one, which is why `best_average_of` returns early when the session is shorter
+than the window: most sessions never reach a thousand solves and pay nothing for the row
+being on screen.
 
-Two properties are worth stating explicitly. **Rolling windows never span a session
-boundary**, because `best_average_of` is called once per session; five solves spread across
-two sessions do not form an ao5. **Filtering by puzzle is the caller's job.** `stats.rs`
-takes whatever slice it is handed. `App::refresh_derived` supplies only the sessions
-matching the active session's puzzle, which is what makes the cached PBs event-specific.
-Combined with the puzzle-retype rule in [architecture.md](architecture.md), which prevents
-a session that already has solves from changing puzzle, this guarantees no personal best
-ever mixes events.
+**The scope is one session, and that is the whole rule.** The signature says so: it takes a
+solve list, not a set of sessions, so there is no boundary for a rolling window to span and
+no way for a faster solve elsewhere to reach the number. `App::refresh_derived` hands it the
+active session's solves, the same list `session_stats` and `trend_of` get, so every figure
+on the stats strip describes the times list beside it.
+
+That replaced an earlier `personal_bests(sessions: &[&Session])`, which took every session
+of the active puzzle and kept the minimum across them. It was defensible in the abstract and
+wrong in use: a csTimer import that landed a second 3x3 session put times from another
+context into the best row of the session on screen, where they read as a calculation bug
+rather than as somebody else's session. Sessions are separate contexts, so the panel beside
+one describes that one. Nothing is lost, because switching sessions switches the whole strip
+with it.
 
 ### What the trend plots
 
@@ -323,8 +330,8 @@ Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
 
 That is the whole of one-handed as far as scrambling is concerned, and mapping it here
 rather than inside `cube.rs` is also what keeps `cube::scramble` a function of cube
-variants only. The event is separate everywhere it matters, meaning its own session and its
-own personal bests, and identical everywhere it does not. A seeded test asserts the two
+variants only. The event is separate everywhere it matters, meaning its own default session
+and its own times, and identical everywhere it does not. A seeded test asserts the two
 generators agree scramble for scramble on the same seed, so the identity cannot quietly
 drift.
 

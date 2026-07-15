@@ -12,9 +12,17 @@ id. Every save file has twelve permanent ones called `default`, one per puzzle:
 | 5 | 6x6 | 11 | clock |
 | 6 | 7x7 | 12 | oh |
 
-One-handed is its own event with its own session and its own personal bests,
-even though `/oh` hands you an ordinary 3x3 scramble, because a one-handed 12
-and a two-handed 12 are not the same achievement.
+One-handed is its own event with its own session, even though `/oh` hands you an
+ordinary 3x3 scramble, because a one-handed 12 and a two-handed 12 are not the
+same achievement.
+
+A session is also the scope of every statistic Cubetimer shows. The averages,
+the `best` row and the trend graph all describe the session you are in, and so
+does the banner that celebrates beating a record, so starting a session is how
+you draw a line and start measuring against what you have done since. Two
+sessions of the same puzzle are two separate contexts and neither one's times
+reach the other's numbers. [stats-and-trend.md](stats-and-trend.md) has the
+detail.
 
 Their solves are yours to penalise and delete as usual, but the sessions
 themselves cannot be renamed, retyped or deleted, so `/4x4` always has somewhere

@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use super::layout::inner_of;
 use super::{
-    dim, panel, C_ARMED, C_IDLE, C_INSPECT, C_PB, C_READY, C_STAGE1, C_STAGE2, C_TIMING,
+    dim, panel, C_ARMED, C_IDLE, C_INSPECT, C_NEW_BEST, C_READY, C_STAGE1, C_STAGE2, C_TIMING,
 };
 use crate::app::{App, TimerState};
 use crate::types::format_millis;
@@ -28,9 +28,9 @@ type TimerView = (String, Color, Option<(String, Color)>, &'static str);
 fn timer_view(app: &App) -> TimerView {
     match app.state {
         TimerState::Idle => {
-            // A personal best recolours the result it was set on, until `app` drops the banner.
-            let color = if app.pb_banner.is_some() {
-                C_PB
+            // A session best recolours the result it was set on, until `app` drops the banner.
+            let color = if app.best_banner.is_some() {
+                C_NEW_BEST
             } else {
                 C_IDLE
             };
@@ -124,7 +124,7 @@ pub(super) fn draw_timer(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // The celebration sits directly over the digits, and is the first line the panel gives up.
-    if let Some(banner) = app.pb_banner.as_deref() {
+    if let Some(banner) = app.best_banner.as_deref() {
         if (inner.height as usize) > body.len() {
             body.insert(
                 0,
@@ -132,7 +132,7 @@ pub(super) fn draw_timer(frame: &mut Frame, app: &App, area: Rect) {
                     banner.to_string(),
                     Style::default()
                         .fg(Color::Black)
-                        .bg(C_PB)
+                        .bg(C_NEW_BEST)
                         .add_modifier(Modifier::BOLD),
                 ),
             );
@@ -307,15 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn a_personal_best_banner_takes_the_row_over_the_digits_and_turns_them_green() {
+    fn a_session_best_banner_takes_the_row_over_the_digits_and_turns_them_green() {
         let mut app = app_with(Puzzle::Cube3, 5);
         app.display_millis = 12_340;
-        app.pb_banner = Some("new pb single: 12.34".to_string());
+        app.best_banner = Some("new best single: 12.34".to_string());
         let buffer = render_buffer(&app, 80, 30);
 
-        let banner = row_with(&buffer, "new pb single: 12.34");
+        let banner = row_with(&buffer, "new best single: 12.34");
         assert!(
-            row_cells(&buffer, banner).iter().any(|c| c.bg == C_PB
+            row_cells(&buffer, banner).iter().any(|c| c.bg == C_NEW_BEST
                 && c.fg == Color::Black
                 && c.modifier.contains(Modifier::BOLD)),
             "the banner is bold black on light green"
@@ -327,7 +327,7 @@ mod tests {
             row_cells(&buffer, digits)
                 .iter()
                 .filter(|c| c.symbol() == "█")
-                .all(|c| c.fg == C_PB),
+                .all(|c| c.fg == C_NEW_BEST),
             "the result celebrates in the same green as the banner"
         );
         render_all(&app);
@@ -340,7 +340,7 @@ mod tests {
         let buffer = render_buffer(&app, 80, 30);
 
         assert_eq!(
-            cells_colored(&buffer, C_PB),
+            cells_colored(&buffer, C_NEW_BEST),
             0,
             "an ordinary solve celebrates nothing"
         );
@@ -356,22 +356,22 @@ mod tests {
     #[test]
     fn the_banner_is_the_first_line_a_short_panel_drops() {
         let mut app = app_with(Puzzle::Cube3, 3);
-        app.pb_banner = Some("new pb ao5: 13.07".to_string());
+        app.best_banner = Some("new best ao5: 13.07".to_string());
         render_all(&app);
 
         // Fifteen rows leave the timer six inside its border: the five glyph rows and the banner.
-        assert!(render(&app, 80, 15).contains("new pb ao5"));
+        assert!(render(&app, 80, 15).contains("new best ao5"));
 
         // Fourteen leave it exactly the glyph rows, and the digits outrank the celebration.
         let text = render(&app, 80, 14);
         assert!(text.contains('█'), "the block font keeps its rows");
-        assert!(!text.contains("new pb ao5"), "the banner is what goes");
+        assert!(!text.contains("new best ao5"), "the banner is what goes");
     }
 
     #[test]
     fn a_banner_never_takes_the_colour_of_a_running_inspection() {
         let mut app = app_with(Puzzle::Cube3, 5);
-        app.pb_banner = Some("new pb single: 9.87".to_string());
+        app.best_banner = Some("new best single: 9.87".to_string());
         app.state = TimerState::Inspecting {
             started: Instant::now(),
         };
@@ -384,7 +384,7 @@ mod tests {
             "the countdown keeps the stage it is in"
         );
         assert_eq!(
-            cells_colored(&buffer, C_PB),
+            cells_colored(&buffer, C_NEW_BEST),
             0,
             "the celebration recolours an idle result and nothing else"
         );

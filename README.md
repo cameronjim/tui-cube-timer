@@ -116,7 +116,7 @@ The user guide is in `docs/`, one topic per file:
 - [Inspection](docs/inspection.md): the 15 second countdown, the 8s and 12s judge calls, and the automatic penalties.
 - [Reviewing solves](docs/reviewing-solves.md): moving through the times list, the solve popup, recalling a scramble, and `/del`.
 - [Sessions and puzzles](docs/sessions.md): the twelve defaults, making your own, the picker, and switching puzzles.
-- [Stats and the trend graph](docs/stats-and-trend.md): WCA averages, the stats strip, `/trend`, and the personal-best banner.
+- [Stats and the trend graph](docs/stats-and-trend.md): WCA averages, the stats strip, `/trend`, and the session-best banner.
 - [Taking your times with you](docs/import-export.md): `/export` and `/import`, and how they line up with csTimer.
 - [Where your times live](docs/your-data.md): the save file, autosave, and `CUBETIMER_DATA`.
 - [Scrambles](docs/scrambles.md): the notation, and how official each event's scrambles really are.
