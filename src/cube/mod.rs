@@ -100,8 +100,8 @@ impl Cube {
     }
 
     /// Whether every face is a solid block of its own color.
-    // Only the tests read this so far; the random-state scramble phase needs it as the goal
-    // test its search runs against.
+    // Still only the tests read this, but three modules' worth now do: `cube`'s own move
+    // algebra, `solver`'s 2x2 interop check and `app`'s preview cache.
     #[allow(dead_code)]
     pub fn is_solved(&self) -> bool {
         let per_face = usize::from(self.n) * usize::from(self.n);
@@ -295,8 +295,8 @@ fn strip_cycle(face: Face, n: usize, depth: usize, i: usize) -> [(Face, usize, u
 }
 
 /// The scramble that undoes `scramble`: tokens reversed, plain and prime swapped.
-// Only the tests call this so far; the random-state scramble phase reaches a state by inverting
-// the solution a solver found for it.
+// Still only the tests call this. The random-state solvers do invert their solutions, but they
+// do it over (axis, power) pairs inside their own coordinate model, never over notation.
 #[allow(dead_code)]
 pub fn invert_scramble(scramble: &str) -> String {
     let mut out = String::with_capacity(scramble.len() + 8);

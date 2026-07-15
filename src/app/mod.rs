@@ -1049,6 +1049,32 @@ mod tests {
     }
 
     #[test]
+    fn a_random_state_2x2_scramble_still_previews_and_a_skewb_still_does_not() {
+        // The 2x2 comes from `solver` now, and its tokens are plain U R F cube notation, so the
+        // whole chain from the solver through the generator to the facelet model has to hold.
+        let (mut app, _g) = test_app("preview-random-state");
+        run_command(&mut app, "2x2");
+        for _ in 0..8 {
+            app.new_scramble();
+            let cube = app.preview.as_ref().expect("a 2x2 scramble must leave a cube to preview");
+            assert_eq!(cube.n(), 2, "the 2x2 previews at the wrong size");
+            assert!(!cube.is_solved(), "a random-state 2x2 cannot be solved: {}", app.scramble);
+        }
+
+        // A Skewb scramble is R U L B with ' suffixes, every token of which parses as a cube
+        // face, so this pin is on `Cube::size` refusing the event rather than on the notation.
+        run_command(&mut app, "skewb");
+        for _ in 0..8 {
+            app.new_scramble();
+            assert!(
+                app.preview.is_none(),
+                "skewb has no cube model, so {} must build nothing",
+                app.scramble
+            );
+        }
+    }
+
+    #[test]
     fn the_preview_cache_follows_every_session_and_puzzle_change() {
         let (mut app, _g) = test_app("cache-preview-session");
         // Navigating, forking, switching back, an event with no model, and a session deleted

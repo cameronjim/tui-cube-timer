@@ -4,6 +4,7 @@ mod app;
 mod cstimer;
 mod cube;
 mod scramble;
+mod solver;
 mod stats;
 mod storage;
 mod types;

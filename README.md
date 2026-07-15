@@ -5,6 +5,9 @@ scramble, times the solve, keeps your averages, and remembers everything the
 next time you open it. If you have used csTimer, the rhythm will feel familiar:
 hold the space bar, wait for green, let go, solve, hit any key to stop.
 
+Scrambles cover twelve WCA events, and 2x2, Pyraminx and Skewb are random-state,
+drawn uniformly from every legal position the way official scrambles are.
+
 Everything else (sessions, penalties, switching puzzles) happens from a small
 command line at the bottom of the screen, so your hands never have to leave the
 keyboard or reach for a mouse.
@@ -15,11 +18,13 @@ Cubetimer is one Rust binary running one loop: wait up to 15 milliseconds for a
 keypress, update the state, redraw the whole screen from that state.
 [ratatui](https://ratatui.rs) draws the interface, and the compiled `.exe`
 carries every library it uses inside it, so there is no runtime and no installer
-on any machine you copy it to. Eight modules divide the work, each with a single
+on any machine you copy it to. Ten modules divide the work, each with a single
 job: `types` holds the shared vocabulary, `app` owns the state machine and every
 `/command`, `ui` turns state into a frame, `scramble` generates WCA notation one
-puzzle family per file, `stats` does the WCA math, `storage` reads and writes the
-save file atomically, and `cstimer` translates to and from csTimer's format.
+puzzle family per file, `solver` produces the random-state scrambles, `cube`
+models the stickers behind `/preview`, `stats` does the WCA math, `storage` reads
+and writes the save file atomically, and `cstimer` translates to and from
+csTimer's format.
 Cubetimer is built for Windows first, because the hold-and-release space bar flow
 needs a terminal that reports key releases and the Windows console does that
 natively.

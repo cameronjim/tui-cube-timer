@@ -1,9 +1,9 @@
 # Cubetimer algorithms
 
 This document covers the maths Cubetimer implements: WCA trimmed averages, untrimmed means,
-rolling bests and session bests (`src/stats.rs`), scramble generation (`src/scramble/`),
-the inspection penalty thresholds and judge calls (`src/app/mod.rs`), and the csTimer
-interchange format (`src/cstimer.rs`). Every claim here describes the code as it stands,
+rolling bests and session bests (`src/stats.rs`), scramble generation (`src/scramble/` and
+`src/solver/`), the inspection penalty thresholds and judge calls (`src/app/mod.rs`), and the
+csTimer interchange format (`src/cstimer.rs`). Every claim here describes the code as it stands,
 including the places where Cubetimer approximates the official rules rather than matching
 them.
 
@@ -321,8 +321,21 @@ reproducible scrambles from `StdRng::seed_from_u64`. `mod.rs` does nothing but m
 no notation and almost no structure. Every generator is a `fn scramble<R: Rng>(rng: &mut R)
 -> String` and every one is total, meaning no retry loops and no path that can fail.
 
-Twelve events, eleven generators. `Puzzle::Oh` is 3x3 with one hand behind your back, so
-the dispatch maps it onto the 3x3 generator verbatim:
+Twelve events, two methods. Nine are random-move and live in `scramble/`, one file per
+family. Three, 2x2, Pyraminx and Skewb, are random-state and live in `src/solver/`, which the
+dispatch reaches through one arm:
+
+```rust
+Puzzle::Cube2 | Puzzle::Pyraminx | Puzzle::Skewb => random_state(puzzle, rng),
+```
+
+`solver::scramble` answers `Some` for exactly those three and `None` for everything else, and
+that arm is what makes the `None` case unreachable, so `random_state` unwraps into an
+`unreachable!` and nothing outside `scramble/` ever handles an `Option`. `generate` and
+`generate_with_rng` stay the only way in, and both stay infallible.
+
+`Puzzle::Oh` is 3x3 with one hand behind your back, so the dispatch maps it onto the 3x3
+generator verbatim:
 
 ```rust
 Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
@@ -351,28 +364,30 @@ saying otherwise would be dishonest.
 
 | Event | TNoodle | Cubetimer | Verdict |
 | --- | --- | --- | --- |
+| 2x2, Pyraminx, Skewb | random-state | random-state | **Method-identical.** Uniform over every legal state, exact-length emission |
 | Clock | random-state | random-move | **Exact.** Clock's moves commute, so uniform amounts already give a uniform state |
 | Megaminx | random-move | random-move | **Emission-identical.** Same distribution, only the PRNG differs |
 | 5x5, 6x6, 7x7 | random-move | random-move | **Equivalent.** Same pools, lengths and legality rule |
-| 2x2, 3x3, 4x4 | random-state | random-move | Approximation |
+| 3x3, 4x4 | random-state | random-move | Approximation |
 | One-handed | random-state (as 3x3) | random-move (as 3x3) | Approximation, identical to 3x3 |
-| Pyraminx, Skewb | random-state | random-move | Approximation |
 | Square-1 | random-state | random-move, shape-aware | Approximation, close |
 
-The three approximation rows are covered in detail at the end of their own sections. The
+The remaining approximation rows are covered in detail at the end of their own sections. The
 general shape of the gap is the same in each case: the state distribution is not uniform,
 because some positions are reachable by many more legal sequences than others, so a
 random-move scramble can occasionally land somewhere far easier than typical. These are
 good practice scrambles and they are what most cubers train on. They are not
-competition-legal, and closing the gap would mean shipping a solver and pruning tables per
-puzzle, which is a large amount of machinery for a terminal timer. The trade-off is
-deliberate.
+competition-legal. Closing the gap means shipping a solver and a distance table per puzzle,
+which is what `src/solver/` now does for the three events whose state spaces are small enough
+to search exhaustively. 3x3 is not one of them, and never will be by this method: it has 4.3
+times 10^19 states, so a table with one byte per state is 43 exabytes.
 
 ---
 
-## Cubes: 2x2 through 7x7
+## Cubes: 3x3 through 7x7
 
-`src/scramble/cube.rs`.
+`src/scramble/cube.rs`. The 2x2 used to be here and is now random-state, in the section above;
+one-handed arrives as a 3x3, mapped in the dispatch, so this module sees five puzzles.
 
 ### The move model
 
@@ -399,7 +414,6 @@ types.
 
 | Puzzle | Move pool | Moves |
 | --- | --- | --- |
-| 2x2 | `U R F` | 11 |
 | 3x3 | `U D L R F B` | 20 |
 | 4x4 | `U D L R F B` + `Uw Rw Fw` | 44 |
 | 5x5 | `U D L R F B` + `Uw Dw Lw Rw Fw Bw` | 60 |
@@ -411,8 +425,6 @@ the same permutation as the complementary turn on the opposite face plus a whole
 rotation, so keeping both would be pure redundancy. Only three of those six are included,
 one per axis. Where a width is not half the cube, all six are kept:
 
-- 2x2: `U` turns 1 of 2 layers, which is half, so the pool is `U R F` and `D L B` are
-  dropped.
 - 4x4: `Uw` turns 2 of 4 layers, which is half, so only `Uw Rw Fw` appear.
 - 5x5: `Uw` turns 2 of 5 layers, not half, so all six wide moves appear.
 - 6x6: `Uw` is 2 of 6, not half, so all six appear; `3Uw` is 3 of 6, which is half, so
@@ -420,7 +432,10 @@ one per axis. Where a width is not half the cube, all six are kept:
 - 7x7: neither 2 of 7 nor 3 of 7 is half, so all six of each width appear.
 
 Every length is fixed, and each one is the count TNoodle emits for that event. Nothing about
-the move count is randomised, including 2x2, which is always exactly 11 moves.
+the move count is randomised. The principle carries down to the 2x2 too, which the random-state
+section above keeps unchanged at `U R F`: `U` turns 1 of 2 layers, which is half, so `D L B` add
+nothing, and "the pool is the three faces that do not touch DBL" is the same fact said from the
+other side.
 
 ### The constraint rule
 
@@ -478,8 +493,8 @@ outside the loop and reused.
 
 The candidate list can never be empty. Every pool spans at least two axes, and the rule only
 ever excludes move types that share the current run's axis, so every move type on any other
-axis always survives the filter. The smallest pool, 2x2's `U R F`, puts its three move types
-on three different axes, so at most one is ever excluded. The code carries a
+axis always survives the filter. The smallest pool here, 3x3's six outer faces, puts two move
+types on each of three axes, so at most two are ever excluded. The code carries a
 `debug_assert!(!candidates.is_empty())` to catch a future pool that breaks this, plus a
 `break` so a release build truncates the scramble rather than panicking.
 
@@ -492,65 +507,238 @@ rule. A scramble from Cubetimer is drawn from the same distribution as a scrambl
 TNoodle for these events. This is what the audit against TNoodle's source changed, and it is
 why the constraint rule was relaxed to the same-axis-run form.
 
-**2x2, 3x3 and 4x4 are approximations**, because TNoodle generates them from a random
-state. The lengths of 11, 20 and 44 are matched to what real TNoodle scrambles for these
-events look like, but matching the length does not make the method the same. The bias is
-mild on 4x4 and most visible on 2x2, where the state space is tiny. One point that is easy
-to miss: Cubetimer's 11 moves on 2x2 and 20 on 3x3 are sequence lengths, not the optimal
-solution depth a random-state scramble is measured by.
+**3x3 and 4x4 are approximations**, because TNoodle generates them from a random state. The
+lengths of 20 and 44 are matched to what real TNoodle scrambles for these events look like, but
+matching the length does not make the method the same. The bias is mild on 4x4. One point that
+is easy to miss: Cubetimer's 20 moves on 3x3 is a sequence length, not the optimal solution
+depth a random-state scramble is measured by. The 2x2 was the third row here until its state
+space turned out to be small enough to solve outright.
 
 ---
 
-## Pyraminx
+## Random state: 2x2, Pyraminx and Skewb
 
-`src/scramble/pyraminx.rs`. Approximation of a random-state event.
+`src/solver/`. Method-identical to the official generator.
 
-A Pyraminx scramble is eleven layer turns followed by up to four tip turns.
+These three events are small enough to solve completely, which is what makes the official
+method available at all. The whole of it is five steps, and `solver/mod.rs` owns four of them
+while each puzzle module owns the fifth, its own move model:
 
-**Layer turns.** Exactly eleven, drawn from `U L R B` with an optional `'`. There is no `2`
-suffix anywhere in Pyraminx notation, because a Pyraminx layer turns 120 degrees and two of
-those is the inverse of one. The only constraint is that **no layer turns twice in a row**.
-That is weaker than a cube's rule, and deliberately so: all four Pyraminx axes intersect, so
-there are no parallel layers the way `L` is parallel to `R`, and the only redundancy to
-prune is the immediate repeat, which would collapse into a single turn and make the
-scramble shorter than eleven moves. The successor is picked by offsetting rather than
-retrying, `(prev + rng.gen_range(1..4)) % 4`, which keeps the three legal successors equally
-likely in one draw.
+1. Give every state of the puzzle an integer index, with 0 the solved state.
+2. Breadth-first search outward from 0, recording the exact distance to solved for every
+   index.
+3. Draw an index uniformly at random, rejecting the ones the search never reached.
+4. Search depth-first for a solution of exactly eleven moves, pruned by the distance table.
+5. Emit the solution backwards. That is the scramble.
 
-**Tips.** The four tips are emitted after every layer turn, in the fixed order `u l r b`,
-each appearing at most once. A tip is a corner trivially rotatable in isolation, so a
-uniformly random state leaves each one solved exactly one time in three, and a solved tip
-contributes no move. The generator draws `0..3` per tip and skips on 0, giving 0 to 4 tip
-moves per scramble with the same distribution the official generator produces.
+Step 3 is why the result is fair: **every legal state is exactly as likely as every other**,
+which is the definition of random-state and the thing a random-move generator cannot promise.
+Step 4 is why every scramble is the same length whatever the state costs, and step 2 is what
+makes step 4 cheap enough to run in a keystroke.
 
-This is the shape TNoodle emits: it solves a uniformly random state in exactly eleven layer
-turns, then appends one move per unsolved tip. Cubetimer reproduces the *shape* and the tip
-distribution, but samples the eleven layer turns instead of solving for them, so the layer
-state is not uniform.
+### The engine
 
----
+`solver::Engine` is the shared machinery, and a puzzle describes itself to it in four fields:
 
-## Skewb
+```rust
+pub(super) struct Engine {
+    pub states: usize,
+    pub axes: usize,
+    pub powers: usize,
+    pub apply: fn(usize, usize, usize) -> usize,
+}
+```
 
-`src/scramble/skewb.rs`. Approximation of a random-state event.
+A move is an `(axis, power)` pair, where power runs `1..=powers` clockwise quarter or third
+turns, and `apply` is a pure total function over `0..states`. That is the entire interface.
+`distances`, `random_reachable` and `solve_exactly` are written once against it, and the three
+puzzle modules contribute nothing but coordinates and tables.
 
-Exactly eleven moves drawn from `R U L B` with an optional `'`, and no `2`, since a Skewb
-turn is also 120 degrees. Those four are the fixed-corner scheme: Skewb scrambling holds one
-corner still, the same trick 2x2 uses to drop from six faces to three, so four of the eight
-corner axes reach every state and the other four never appear in notation.
+### Coordinates, and why orientations are indexed by position
 
-**The only constraint is that no axis repeats consecutively**, and there is nothing stronger
-to add. On a cube, `R` and `L` are parallel and commute, which is what makes the same-axis
-run rule necessary. No two Skewb axes are parallel, so no two moves commute, and the only
-sequence that collapses is the immediate repeat. Same successor arithmetic as Pyraminx: draw
-from the three survivors and step over the excluded index, so no successor is starved. A
-test asserts every ordered pair of distinct axes actually occurs, which guards both against
-the constraint drifting stricter than TNoodle's and against that arithmetic biasing a
-successor.
+Each module packs one state into a single `usize` built from independent coordinates. 2x2 is
+`perm * 729 + orient` over 5,040 permutations of seven corners and 729 twists of six of them.
+Pyraminx is 720 edge permutations, 32 flip patterns and 81 axial twists. Skewb is 360 even centre
+permutations, 12 even permutations of the corner ring, 27 twists of the three corners `R`, `U`
+and `L` turn, and 81 twists of that ring.
 
-TNoodle generates Skewb from a random state, rejecting anything solvable in fewer than
-seven moves and padding the result out to eleven. Cubetimer matches the length and the
-notation, not the state distribution, and has no lower bound on solution depth.
+The discipline that makes all of this fast is that **orientations are indexed by position, not
+by piece**. Ask "how twisted is the corner currently sitting at UFR" rather than "how twisted
+is the white-red-green corner". The difference matters because it decides what a move needs to
+know: with position indexing, where a turn sends the twist at each position depends only on the
+turn and on the twists, never on which pieces happen to be there. Each coordinate's transition
+is therefore a function of that coordinate alone, so each coordinate gets its own small move
+table, built once by decoding its range, turning, and re-encoding.
+
+`apply` is then nothing but lookups. Skewb's is four:
+
+```rust
+fn apply(state: usize, axis: usize, power: usize) -> usize {
+    let m = moves();
+    let col = column(axis, power);
+    let (centre, ring, axis_twist, ring_twist) = unpack(state);
+    pack(
+        usize::from(m.centre[centre * N_MOVES + col]),
+        usize::from(m.ring[ring * N_MOVES + col]),
+        usize::from(m.axis_twist[axis_twist * N_MOVES + col]),
+        usize::from(m.ring_twist[ring_twist * N_MOVES + col]),
+    )
+}
+```
+
+The alternative, one table over the whole state space, would be 9.4 million rows by 8 columns
+for Skewb where four tables of 360, 12, 27 and 81 rows do the same work.
+
+### The distance table
+
+`Engine::distances` is an ordinary breadth-first search from index 0, writing `depth + 1` into
+every index it reaches for the first time and leaving `UNREACHABLE`, which is `u8::MAX`,
+everywhere it does not. It returns one byte per state: 3.7 MB for 2x2, 1.9 MB for Pyraminx and
+9.4 MB for Skewb.
+
+The move tables and the distance table each live behind a `OnceLock`, and **they have to be two
+locks and not one**, because the search calls `apply`, which reads the move tables, so a single
+lock holding both would deadlock initializing itself. Building is lazy, on the first scramble of
+that event, which measured in release is 0.08 s for Pyraminx, 0.42 s for 2x2 and 1.30 s for
+Skewb. Nothing is built at startup and nothing is ever built inside the draw loop.
+
+### Encoded space, reachable space, and rejection
+
+An encoding is allowed to span more indices than the puzzle has states, and two of the three
+do. Pyraminx encodes all 720 edge permutations while only the 360 even ones are reachable,
+because every turn is a 3-cycle. Skewb encodes 9,447,840 states of which exactly a third,
+3,149,280, are reachable, because a third of an `R`, `U` or `L` turn both twists its own corner
+and cycles the ring, which pins the twist total of DFR, URB and DLB to the ring permutation.
+
+Sampling handles that by rejection against the table rather than by arithmetic:
+
+```rust
+pub fn random_reachable<R: Rng>(&self, dist: &[u8], rng: &mut R) -> usize {
+    loop {
+        let s = rng.gen_range(0..self.states);
+        if dist[s] != UNREACHABLE {
+            return s;
+        }
+    }
+}
+```
+
+That choice is deliberate and it is the load-bearing one in the whole design. **Uniformity
+becomes a property of the search rather than of a parity argument written by hand.** A
+hand-written constraint that was subtly wrong would quietly bias every scramble the event ever
+produced, and nothing about the output would look wrong. A table that reached the wrong set of
+states, by contrast, has the wrong number of states at some depth, which the fixtures below
+catch immediately. The cost is one wasted draw in two for Pyraminx and two in three for Skewb,
+which is a few nanoseconds against a table lookup.
+
+The discipline that keeps this affordable: keep the encoded space within a small multiple of
+the reachable count, and never above roughly twenty million.
+
+### The exact-length search, and why its branch order is random
+
+`Engine::solve_exactly(start, len, dist, rng)` looks for a *canonical* solution of exactly
+`len` moves, canonical meaning no two consecutive moves turn one axis. The distance table
+prunes it to almost nothing: any node whose distance exceeds the moves remaining cannot reach
+solved, so the branch dies immediately.
+
+```rust
+if usize::from(dist[s]) > remaining {
+    return false;
+}
+```
+
+Exactly eleven, not at most eleven, is what TNoodle does and it is why real 2x2 scrambles are
+always eleven moves even though the average optimal solution is 8.76. A state solvable in eight
+is padded out by searching for a longer canonical sequence, and canonicity is what stops the
+padding from cancelling with itself.
+
+The `rng` parameter is the part the original plan did not have, and it exists because a fixed
+branch order has a visible defect. A scramble is the solution written backwards, so the *last*
+token of the scramble is the *first* move the search tried. With the branches tried in a fixed
+order, that first move is nearly always the first one in the list, so the whole tail of every
+scramble is pinned. Measured over the first 400 seeds, before and after:
+
+| Event | Fixed order | Shuffled per node |
+| --- | --- | --- |
+| 2x2 | `U'` ended 397 of 400 scrambles, `U2` the other 3; two of nine tokens ever appeared | all nine tokens, between 26 and 53 each |
+| Pyraminx | `U'` ended the core of 400 of 400 | all eight tokens, between 43 and 65 each |
+| Skewb | `R'` ended 400 of 400 | all eight tokens, between 40 and 62 each |
+
+None of that is a uniformity bug: the state was drawn uniformly either way, and the emitted
+scramble genuinely reaches it. It is a fair scramble that reads as broken, which for a scramble
+generator is much the same problem, and a speedcuber notices it on the second solve. The fix is
+a Fisher-Yates shuffle of the candidate moves at every node, over a stack array rather than a
+`Vec` because the function recurses eleven deep:
+
+```rust
+// Fisher-Yates over the candidates, fresh at every node.
+for i in (1..count).rev() {
+    moves.swap(i, rng.gen_range(0..=i));
+}
+```
+
+Shuffling cannot change *whether* a solution of a given length exists, only which one comes
+back, so the search's correctness is untouched and the toy-puzzle test that pins it against
+brute force asserts the same agreement it did before. Determinism is preserved too, because the
+randomness comes from the caller's rng: the same seed still gives the same scramble, which is
+what every seeded test in the tree depends on. Each puzzle module documents the order it draws
+from the rng, since a test that wants to reproduce a scramble's state has to draw in the same
+order.
+
+### The fixtures are the correctness anchor
+
+The distance table doubles as proof that the move model is right, because the number of states
+at each depth is published from prior exhaustive searches. Every module asserts all twelve rows
+and the total:
+
+| Depth | 2x2 | Pyraminx | Skewb |
+|---|---|---|---|
+| 0 | 1 | 1 | 1 |
+| 1 | 9 | 8 | 8 |
+| 2 | 54 | 48 | 48 |
+| 3 | 321 | 288 | 288 |
+| 4 | 1,847 | 1,728 | 1,728 |
+| 5 | 9,992 | 9,896 | 10,248 |
+| 6 | 50,136 | 51,808 | 59,304 |
+| 7 | 227,536 | 220,111 | 315,198 |
+| 8 | 870,072 | 480,467 | 1,225,483 |
+| 9 | 1,887,748 | 166,276 | 1,455,856 |
+| 10 | 623,800 | 2,457 | 81,028 |
+| 11 | 2,644 | 32 | 90 |
+| Total | 3,674,160 | 933,120 | 3,149,280 |
+
+These are Jaap Scherphuis's God's-algorithm counts, and Pyraminx's exclude the tips, which are
+independent. Getting twelve rows right per puzzle while summing to the exact total leaves no
+room for a wrong cycle, a wrong orientation delta or a missed parity constraint: a single
+mistake in a move definition changes which states are reachable in how many moves, and the
+histogram moves with it.
+
+There is exactly one error class the counts cannot see. Read every turn in the opposite sense
+and you get the mirror image of the puzzle, which has the same distance table. So each module
+also checks its cycles directly against TNoodle's own source, `TwoByTwoSolver.java`,
+`PyraminxSolver.java` and `SkewbPuzzle.java`, and documents the mapping in its header. That,
+plus solving one emitted scramble on real hardware, is the check for a relabelled axis.
+
+### Notation, per event
+
+The three modules differ only in their move models and their emission. What each one emits:
+
+| Event | Moves | Suffixes | Length |
+| --- | --- | --- | --- |
+| 2x2 | `U R F` | `'` and `2` | exactly 11 tokens |
+| Pyraminx | `U L R B`, tips `u l r b` | `'` only | exactly 11 core tokens, then one per unsolved tip |
+| Skewb | `R U L B` | `'` only | exactly 11 tokens |
+
+2x2 fixes DBL and describes the other seven corners, which is what makes `U R F` a complete
+move set: every state is reachable without ever turning D, L or B. Skewb's `R U L B` is the
+same trick in fixed corner notation, holding ULF still. Neither Pyraminx nor Skewb has a `2`
+suffix, because both turn 120 degrees and two of those is the inverse of one.
+
+Pyraminx's tips are the one thing outside the state index. A tip is a corner rotatable in
+isolation, so it is independent of everything else and of the other three, and each is drawn
+uniformly from three positions after the core solution is emitted. A tip is therefore already
+solved one time in three and contributes no token, which gives 0 to 4 tip moves per scramble
+with the same distribution the official generator produces.
 
 ---
 

@@ -48,14 +48,14 @@ testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `r
 `app/`, and a private `mod testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render`
 and `render_all` for all three renderers. Never duplicate a helper across sibling files.
 
-Current state, 457 tests, all green:
+Current state, 485 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
 | `app/commands.rs` | 52 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
 | `stats.rs` | 45 | Trimmed averages, penalties, session stats, session bests |
 | `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
-| `app/mod.rs` | 36 | State machine, keys, the stop guards, the derived caches, the preview cube behind the scramble |
+| `app/mod.rs` | 37 | State machine, keys, the stop guards, the derived caches, the preview cube behind the scramble |
 | `cube/mod.rs` | 34 | Move orders and identities at every size and width, colour conservation, direction pins, inversion, parse errors |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
 | `ui/overlay.rs` | 25 | All five popups at four sizes, clamping, the cursor, which one wins, the trend graph's y domain, the net drawn from a known scramble, both glyph sweeps |
@@ -64,21 +64,25 @@ Current state, 457 tests, all green:
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `ui/net.rs` | 15 | The footprint formulas, the colour map, face placement, compact pairing, the glyph set |
+| `solver/cube2.rs` | 15 | The depth distribution, both coordinates, the move tables, emission shape, the cross-model pin against `cube` |
+| `solver/skewb.rs` | 13 | The depth distribution, the reachable third and what pins it, TNoodle's facelet cycles, emission shape |
+| `solver/pyraminx.rs` | 13 | The depth distribution, the unreachable odd half, TNoodle's edge cycles, tips, emission shape |
 | `ui/mod.rs` | 12 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing, the best row's scope |
-| `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
 | `app/inspection.rs` | 12 | The countdown, the `+2` and DNF thresholds, the judge-call stages, an aborted arm |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the session-best banner |
-| `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
-| `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
+| `scramble/mod.rs` | 8 | Every puzzle dispatches, is non-empty and is seed-stable; the three random-state events' shapes at the dispatch |
+| `scramble/cube.rs` | 7 | Move pools, lengths, the legality rule, determinism |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
-| `scramble/mod.rs` | 5 | Every puzzle dispatches, is non-empty and is seed-stable |
+| `solver/mod.rs` | 4 | The `Engine` against a toy puzzle: the distance table by hand, the search against brute force, its randomization, rejection sampling |
 
 The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
 each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a generator for
-it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
+it fails immediately rather than shipping an empty scramble. Three of those loops now cross
+into `solver` for three of the twelve, which makes them the end-to-end coverage of the whole
+scramble path and is exactly what they are for. `ui/mod.rs` does the same
 thing, rendering every puzzle at every size, and so does
 `cstimer::every_event_exports_a_scramble_type_that_imports_back_to_it`, which fails the
 moment an event is added without a csTimer scramble type to carry it. `cube/mod.rs` sweeps
@@ -153,8 +157,8 @@ disk untouched, which is the property that makes a failed run non-destructive.
 
 ### Seeded property tests, the house pattern for generators
 
-Every file under `scramble/` tests randomized output the same way, and the pattern is worth
-imitating for anything else that generates rather than computes.
+Every file under `scramble/` and `solver/` tests randomized output the same way, and the pattern
+is worth imitating for anything else that generates rather than computes.
 
 Drive the generator with a seeded `StdRng` and assert **properties, not exact strings**. A
 golden string breaks on any harmless change and tells you nothing about which rule was
@@ -178,25 +182,80 @@ sample would miss. The supporting shape around it:
 - **Panic messages that name the offender.** Every assertion interpolates the scramble
   (`"repeated layer in {scramble:?}"`). With 400 seeds a bare `assert!` tells you nothing.
 - **Coverage assertions, not just legality.** It is not enough that no rule is broken; the
-  generator also has to actually reach everything. `every_axis_and_both_directions_appear`,
-  `tip_counts_range_over_zero_through_four` and `every_ordered_pair_of_distinct_axes_occurs`
-  all exist to catch a generator that is legal and starved. The last one is the sharpest: it
-  counts every ordered axis pair over 600 seeds and fails if any legal pair is
-  disproportionately rare, which is what would happen if the skip-the-previous-index
-  arithmetic were subtly wrong.
-- **Statistical assertions with wide bands.** `a_tip_is_solved_roughly_one_time_in_three`
-  asserts a count falls in `950..1180` against an expectation of about 1067. Wide enough not
+  generator also has to actually reach everything. `all_three_suffixes_are_used`,
+  `every_axis_and_both_powers_appear`, `tip_counts_range_over_zero_through_four` and
+  `the_last_token_of_a_scramble_ranges_over_the_move_set` all exist to catch a generator that
+  is legal and starved. The last one is the sharpest, and the story behind it is under the
+  solvers below.
+- **Statistical assertions with wide bands.** `tip_counts_range_over_zero_through_four`
+  asserts each Pyraminx tip is unsolved between 340 and 460 times in 600 seeds against an
+  expectation of about 400, and `the_sampled_depth_averages_the_published_optimal` asserts a
+  mean solution depth inside a quarter of a move of the published figure. Wide enough not
   to be flaky, tight enough to catch a wrong model.
 - **Determinism gets its own test.** Same seed, same scramble; different seed, different
-  scramble.
-- **An official scramble as a fixture.** `pyraminx.rs` runs its `assert_well_formed` against
-  `OFFICIAL`, a scramble copied from a real TNoodle competition sheet. This proves the
-  assertions accept genuine WCA output and are not just a description of Cubetimer's own
-  quirks. Worth adding for any event where a real scramble is easy to come by.
+  scramble. This is why every source of randomness is threaded from one caller-supplied `Rng`
+  rather than reached for internally, the solvers' search order included.
+- **A published figure as a fixture.** Where the event has one, assert against it rather than
+  against the generator's own behaviour. The solvers reproduce twelve rows of God's-algorithm
+  counts each; `square1.rs` checks its solved slot array against TNoodle's.
 - **Guards against drift.** `legality_predicate_rejects_illegal_sequences` pins `is_legal`
   down case by case and `big_cubes_do_produce_runs_of_three_on_one_axis` asserts same-axis
   runs longer than two really do occur, which together stop the cube constraint from
   quietly becoming stricter than TNoodle's again.
+
+### The solvers
+
+`solver/` is the one part of the tree where correctness can be *proved* rather than argued, and
+the tests are built around that. Five techniques, in descending order of how much they buy:
+
+**The depth distribution is the spine.** Each puzzle module asserts the full count of states at
+every depth from 0 to 11, that nothing sits deeper, that the unreachable count is exactly what
+the encoding predicts, and that the whole thing sums to the puzzle's published state count.
+These are Jaap Scherphuis's God's-algorithm counts, twelve numbers per puzzle, and they are not
+a smoke test: a single wrong cycle, a wrong orientation delta or a missed parity constraint
+changes which states are reachable in how many moves, so the histogram moves and the test names
+the depth it moved at. Everything else in the file is a supporting check on something the
+distribution cannot see.
+
+**Round trips, in both directions.** For a few hundred seeds each: sample a state, solve it,
+fold the solution back over the state and assert it reaches 0; then take the emitted scramble,
+parse it, fold it over 0 and assert it reaches the state that was sampled. The second half is
+what actually pins the inversion and the token emission, because an off-by-one in the
+power-to-suffix arithmetic solves fine and scrambles wrongly.
+
+**The cross-model pin, for 2x2 only.** `solver/cube2.rs` maps a facelet `crate::cube::Cube` into
+its own corner coordinates and asserts the two models agree, on every one of the nine moves from
+two hundred random positions and on the state behind a hundred seeded scrambles. `cube` was
+written from facelet permutations and `cube2` from corner coordinates, independently, so
+agreement on that many moves is the strongest check this codebase can express. It is also the
+reason the 2x2's scramble preview can be trusted.
+
+**Mutation testing, by hand, on the search randomization.** `Engine::solve_exactly` shuffles its
+candidate moves at every node, and the reason is a defect a passing suite did not catch: with a
+fixed branch order, `U'` ended 397 of 400 2x2 scrambles and 400 of 400 Pyraminx cores. That was
+verified by disabling the shuffle and reading the counts back out, then re-enabling it and
+measuring the spread, and both numbers are recorded in
+[algorithms.md](algorithms.md#the-exact-length-search-and-why-its-branch-order-is-random). Each
+of the three modules now carries a `the_last_..._of_a_scramble_ranges_over_the_move_set` test
+asserting the whole move set appears and that no token takes more than three fifths of the
+scrambles, and `solver/mod.rs` asserts on a toy puzzle that one state yields at least twenty
+distinct solutions across 200 seeds while each individual seed still repeats exactly. The
+general lesson: when a defect is invisible to every existing assertion, break the fix
+deliberately, measure, and write the assertion that fails.
+
+**A toy puzzle for the engine itself.** `solver/mod.rs` tests `Engine` against a two-axis
+puzzle over Z/8, small enough that the distance table is written out by hand as
+`[0, 1, 1, 2, 2, 2, 1, 1]` and the exact-length search is checked against an exhaustive brute
+force for every start and every length up to seven. The real puzzles then only have to be right
+about their own move models.
+
+**What the tables cost the suite.** The `OnceLock`s make each puzzle's tables and distance table
+a once-per-binary cost, however many tests touch them, but in debug that cost is real: about
+3.3 s for 2x2, 0.6 s for Pyraminx and 4.5 s for Skewb. Because the tests run in parallel threads
+those overlap, and the full debug suite lands at roughly 7 s of test time and under 9 s of wall
+time, so nothing needed weakening and no `[profile.test]` override was added. If a fourth solver
+ever pushes the suite past twenty seconds, the fix is `opt-level = 1` on the test profile with a
+comment saying why, never a shorter fixture.
 
 ### Replay verification
 

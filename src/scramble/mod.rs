@@ -1,10 +1,13 @@
-//! Random-move scramble generation in WCA notation, one generator per puzzle family.
+//! Scramble generation in WCA notation, one generator per puzzle family.
+//!
+//! Nine events scramble by random moves, from the modules below. 2x2, Pyraminx and Skewb
+//! are random-state and come from `crate::solver`, which draws a uniformly random legal
+//! state and emits the moves that reach it. Either way [`generate`] and [`generate_with_rng`]
+//! are the only way in and always hand back a scramble.
 
 mod clock;
 mod cube;
 mod megaminx;
-mod pyraminx;
-mod skewb;
 mod square1;
 
 use crate::types::Puzzle;
@@ -19,21 +22,27 @@ pub fn generate(puzzle: Puzzle) -> String {
 /// The same scramble, drawing randomness from `rng` so a seed always repeats.
 pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
     match puzzle {
-        Puzzle::Cube2
-        | Puzzle::Cube3
-        | Puzzle::Cube4
-        | Puzzle::Cube5
-        | Puzzle::Cube6
-        | Puzzle::Cube7 => cube::scramble(puzzle, rng),
+        // The three events `solver` answers for, whose scrambles are random-state.
+        Puzzle::Cube2 | Puzzle::Pyraminx | Puzzle::Skewb => random_state(puzzle, rng),
+        Puzzle::Cube3 | Puzzle::Cube4 | Puzzle::Cube5 | Puzzle::Cube6 | Puzzle::Cube7 => {
+            cube::scramble(puzzle, rng)
+        }
         // One-handed is a 3x3 with a hand behind your back, so it takes the 3x3 generator
         // verbatim. Mapping it here is also what keeps `cube` a function of cube variants only.
         Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
-        Puzzle::Pyraminx => pyraminx::scramble(rng),
-        Puzzle::Skewb => skewb::scramble(rng),
         Puzzle::Megaminx => megaminx::scramble(rng),
         Puzzle::Square1 => square1::scramble(rng),
         Puzzle::Clock => clock::scramble(rng),
     }
+}
+
+/// The random-state scramble for one of the three events `solver` knows how to solve.
+///
+/// `solver::scramble` returns None for every other event, and the arm above is what makes
+/// that case unreachable, so nothing outside this module ever sees an `Option`.
+fn random_state<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
+    crate::solver::scramble(puzzle, rng)
+        .unwrap_or_else(|| unreachable!("{} is not a random-state event", puzzle.name()))
 }
 
 #[cfg(test)]
@@ -74,6 +83,69 @@ mod tests {
             let oh = generate_with_rng(Puzzle::Oh, &mut StdRng::seed_from_u64(seed));
             let cube3 = generate_with_rng(Puzzle::Cube3, &mut StdRng::seed_from_u64(seed));
             assert_eq!(oh, cube3, "seed {seed} produced a different one-handed scramble");
+        }
+    }
+
+    /// The tokens of a scramble, asserting the frame every event's notation shares.
+    fn tokens(puzzle: Puzzle, seed: u64) -> Vec<String> {
+        let s = generate_with_rng(puzzle, &mut StdRng::seed_from_u64(seed));
+        assert_eq!(s.trim(), s, "{} left stray whitespace: {s:?}", puzzle.name());
+        assert!(!s.contains("  "), "{} doubled a space: {s:?}", puzzle.name());
+        s.split(' ').map(str::to_owned).collect()
+    }
+
+    // The three pins below are on the dispatch rather than on `solver`: they are what says the
+    // random-state events are wired to the right generator and not merely that it works.
+
+    #[test]
+    fn a_2x2_scramble_arrives_as_eleven_moves_of_u_r_and_f() {
+        for seed in 0..40u64 {
+            let tokens = tokens(Puzzle::Cube2, seed);
+            assert_eq!(tokens.len(), 11, "seed {seed} gave {tokens:?}");
+            for token in &tokens {
+                let (face, suffix) = token.split_at(1);
+                assert!(matches!(face, "U" | "R" | "F"), "{token} is not a 2x2 face");
+                assert!(matches!(suffix, "" | "'" | "2"), "{token} is not 2x2 notation");
+            }
+        }
+    }
+
+    #[test]
+    fn a_skewb_scramble_arrives_as_eleven_turns_of_r_u_l_and_b() {
+        for seed in 0..40u64 {
+            let tokens = tokens(Puzzle::Skewb, seed);
+            assert_eq!(tokens.len(), 11, "seed {seed} gave {tokens:?}");
+            for token in &tokens {
+                let (corner, suffix) = token.split_at(1);
+                assert!(matches!(corner, "R" | "U" | "L" | "B"), "{token} is not a Skewb corner");
+                // A corner turn is a third of a turn, so `2` is not Skewb notation.
+                assert!(matches!(suffix, "" | "'"), "{token} carries a suffix Skewb never uses");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pyraminx_scramble_arrives_as_eleven_core_turns_and_up_to_four_tips() {
+        for seed in 0..40u64 {
+            let tokens = tokens(Puzzle::Pyraminx, seed);
+            let core = tokens.iter().take_while(|t| t.starts_with(['U', 'L', 'R', 'B'])).count();
+            assert_eq!(core, 11, "seed {seed} gave {tokens:?}");
+            let tips = &tokens[core..];
+            assert!(tips.len() <= 4, "seed {seed} turned a tip twice: {tokens:?}");
+            for token in tokens.iter() {
+                let (vertex, suffix) = token.split_at(1);
+                assert!(
+                    matches!(vertex, "U" | "L" | "R" | "B" | "u" | "l" | "r" | "b"),
+                    "{token} is not a Pyraminx vertex"
+                );
+                assert!(matches!(suffix, "" | "'"), "{token} carries a suffix Pyraminx never uses");
+            }
+            // Tips come last, in u l r b order, one token each; strictly increasing says both.
+            let order: Vec<usize> =
+                tips.iter().map(|t| "ulrb".find(|c: char| t.starts_with(c)).unwrap_or(4)).collect();
+            for pair in order.windows(2) {
+                assert!(pair[0] < pair[1], "tips out of order in {tokens:?}");
+            }
         }
     }
 

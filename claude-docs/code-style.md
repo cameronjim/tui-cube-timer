@@ -6,26 +6,31 @@ says otherwise.
 
 ## Module boundaries
 
-Each of the eight modules owns exactly one concern, and the dependency arrows only point
+Each of the ten modules owns exactly one concern, and the dependency arrows only point
 one way:
 
 ```
-main.rs  ->  app/   ->  cstimer.rs, scramble/, stats.rs, storage.rs, types.rs
-main.rs  ->  ui/    ->  app/ (read-only), types.rs
+main.rs  ->  app/       ->  cstimer.rs, cube/, scramble/, stats.rs, storage.rs, types.rs
+main.rs  ->  ui/        ->  app/ (read-only), cube/, types.rs
+             scramble/  ->  solver/, types.rs
 ```
 
-`app/`, `scramble/` and `ui/` are directories, not files, because one responsibility
-outgrew one file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per puzzle
-family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
-block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
+`app/`, `scramble/`, `solver/`, `ui/` and `cube/` are directories, not files, because one
+responsibility outgrew one file or is expected to. `scramble/mod.rs` dispatches on `Puzzle`
+to one generator per puzzle family, and to `solver/` for the three random-state events;
+`solver/mod.rs` holds the shared engine and one file per puzzle sits behind it;
+`ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
+block font, `ui/overlay.rs` draws the popups on top, `ui/net.rs` turns a `Cube` into net
+lines and `ui/layout.rs` holds the pure
 geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
-command mode, `app/selection.rs` owns the times cursor and all four overlays,
+command mode, `app/inspection.rs` runs the fifteen second countdown, `app/selection.rs` owns
+the times cursor and every overlay,
 `app/progress.rs` owns the trend and the session-best celebration, and `app/repair.rs`
 repairs a save file. A directory is still one module for the purposes of this document: the
 boundary rules below apply to `ui/` as a whole, not to each file inside it, and the same
-goes for `app/`.
+goes for `app/`, `scramble/` and `solver/`.
 
-`cstimer.rs` is the newest of the eight and shows the shape a pure module should keep:
+`cstimer.rs` shows the shape a pure module should keep:
 `export` takes a `&SaveFile` and returns a `String`, `import` takes a `&str` and returns
 sessions, and neither opens a file or knows what an id is. The commands that call it do the
 IO through the same paths every other write uses. A converter that wrote its own file would
@@ -111,8 +116,11 @@ everybody else.
 The split line is roughly 500 lines of non-test code, and it is a responsibility split, not
 a line-count split. Never split by "first half, second half".
 
-The three directories show what a good split looks like. `scramble/` divides by puzzle
-family, because the generators share nothing but the `Rng` they are handed. `ui/` divides
+The directories show what a good split looks like. `scramble/` and `solver/` both divide by
+puzzle family, because the generators share nothing but the `Rng` they are handed, and
+`solver/mod.rs` is the one place a family-per-file split still left something shared: the
+`Engine` every puzzle describes itself to, which is what keeps the breadth-first search, the
+sampling and the exact-length search written once. `ui/` divides
 by kind of work: `mod.rs` draws the frame, `timer.rs` draws the one panel with a rendering
 model of its own, `overlay.rs` draws the popups over both, and `layout.rs` and `net.rs`
 compute geometry and touch neither `Frame` nor `App`, which turned the degradation rules and

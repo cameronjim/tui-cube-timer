@@ -2,6 +2,7 @@
 
 Cubetimer is a speedcube timer that runs in the terminal: scrambles in WCA notation for
 twelve events (2x2 through 7x7, Pyraminx, Skewb, Megaminx, Square-1, Clock, 3x3 one-handed),
+random-state for the three of those small enough to solve exhaustively,
 optional 15 second inspection with the 8 and 12 second judge calls, mo3 through ao1000,
 session bests and sessions persisted as JSON, and csTimer import and export. It is
 written in Rust on top of ratatui and crossterm, and it is Windows-first, because the
@@ -26,7 +27,7 @@ Changed behavior arrives with updated tests. Same change set, no follow-up promi
 exceptions. The only change that may leave the suite untouched is one where nothing
 observable changed. Details in `claude-docs/testing.md`.
 
-**2. Separation of concerns, one responsibility per module.** The nine modules and their
+**2. Separation of concerns, one responsibility per module.** The ten modules and their
 single jobs:
 
 | Module | Responsibility |
@@ -34,15 +35,16 @@ single jobs:
 | `main.rs` | Process lifecycle and the event loop: load, init terminal, poll, draw, restore, final save |
 | `app/` | State machine: timer states, key handling, `/commands`, and the derived fields the UI reads |
 | `ui/` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
-| `scramble/` | Scramble generation in WCA notation, one generator per puzzle family |
+| `scramble/` | Scramble generation in WCA notation: the dispatch, plus the nine random-move generators |
+| `solver/` | Random-state scrambles for the three events small enough to solve exhaustively |
 | `cube/` | Facelet cube state for the NxN events: what a scramble leaves on each sticker |
 | `stats.rs` | Pure statistics: trimmed averages, session summaries, session bests |
 | `cstimer.rs` | Pure conversion to and from csTimer's export format; no file IO, the commands do that |
 | `storage.rs` | Where the save file lives, and reading and writing it atomically |
 | `types.rs` | Shared vocabulary and the serde shape of the persisted file |
 
-Three of those are directories split along an internal seam, and a fourth, `cube/`, is one
-file until the solvers give it a second:
+Four of those are directories split along an internal seam, and a fifth, `cube/`, is one
+file:
 
 | File | Responsibility |
 |---|---|
@@ -59,30 +61,42 @@ file until the solvers give it a second:
 | `ui/net.rs` | Pure net geometry: a `Cube` as colored block-glyph lines. No `Frame`, no `App` |
 | `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
 | `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
-| `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |
+| `scramble/{cube,megaminx,square1,clock}.rs` | One random-move puzzle family each |
+| `solver/mod.rs` | The shared `Engine`: distance table, uniform sampling, the exact-length search, and the dispatch |
+| `solver/cube2.rs` | 2x2 corner coordinates, move tables, exact-11 scrambles |
+| `solver/pyraminx.rs` | Pyraminx edge and axial coordinates, tips, exact-11 scrambles |
+| `solver/skewb.rs` | Skewb centre and corner coordinates, move tables, exact-11 scrambles |
 
 No module reaches around another's API. `ui` reads `App` fields and never touches
 `Instant`, the filesystem, or `stats` (statistics are cached on `App` by `refresh_derived`
 because recomputing them in the 15 ms draw loop can hang on a large save file). The preview
 cube is cached the same way and for the same reason, by `refresh_preview` at every site that
 assigns the scramble: `cube/` is pure state that a scramble string feeds and `ui/net.rs`
-draws, and it never appears in `draw`. `app` is
+draws, and it never appears in `draw`. `solver/` sits behind `scramble/` the same way:
+`scramble::generate` and `generate_with_rng` are still the only public path to a scramble and
+still infallible, and nothing in `app` or `ui` knows a solver exists. `app` is
 the only caller of `storage::save` and of `cstimer`, which opens no file of its own.
 Nothing outside `storage.rs` decides where data lives. `App`'s public surface is the whole
 of `app`: `crate::app::App` keeps every path it had before the directory split, and
 `main.rs` and `ui` are unaware there is more than one file behind it.
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
-rather than appending. Nothing in `src/` is over the line. The inspection cut has landed, so
-the state machine has room again: `app/mod.rs` is at 454 non-test lines. `ui/overlay.rs` is
-now the file closest to the line at 456, then `app/mod.rs` at 454 and `app/commands.rs` at
-446, with `ui/mod.rs` at 384, `cstimer.rs` at 372, `storage.rs` at 345 and `cube/mod.rs` at
-319 behind them; the other two new files are small, `ui/net.rs` at 155 and
-`app/inspection.rs` at 80. **The seam waiting now is in `ui/overlay.rs`**: the trend cluster,
+rather than appending. Nothing in `src/` is over the line, and counting stops at the file's
+`#[cfg(test)]`. `ui/overlay.rs` is still the file closest to it at 456, then `app/mod.rs` at
+454 and `app/commands.rs` at 446, with the largest of the new solvers, `solver/skewb.rs`, at
+431 next, then `ui/mod.rs` at 384, `cstimer.rs` at 372, `storage.rs` at 345, `solver/pyraminx.rs`
+at 329 and `cube/mod.rs` at 319 behind them. The rest of `solver/` has plenty of room,
+`solver/cube2.rs` at 259 and `solver/mod.rs` at 160, and `scramble/cube.rs` dropped to 147 when
+the 2x2 left it. **The seam waiting now is in `ui/overlay.rs`**: the trend cluster,
 meaning `TREND_PERCENTILE`, `TREND_TRIM_MIN`, `TREND_FLAT_PAD` and the `TrendPlot` arithmetic
 of `trend_top`, `trend_plot` and `trend_ticks` behind `draw_trend`, which is the one popup
-that computes a picture instead of laying text out. Nothing else has an obvious seam left, so
-treat growth past roughly 500 in any of them as the prompt to look for one.
+that computes a picture instead of laying text out. `solver/skewb.rs` has a second one behind
+that, and it is worth naming now that the file is the fourth largest: the geometry derivation,
+meaning `Rot`, `rot`, `turned`, `leans`, `face_of`, `corner_of` and `corners_turned` behind the
+single `turn`, which is the part that turns two arrays of corner signs into every table and is
+the only part of the file that reasons about the solid rather than about indices. Nothing else
+has an obvious seam left, so treat growth past roughly 500 in any of them as the prompt to look
+for one.
 `app/inspection.rs` is the most recent cut and it shows the shape to aim for, as
 `app/progress.rs`, `app/selection.rs` and `ui/timer.rs` did before it: the parent keeps one
 entry point per cluster (`start_inspection`, `refresh_inspection`, `on_key_inspecting`,

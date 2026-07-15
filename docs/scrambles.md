@@ -13,6 +13,8 @@ alongside the one it was done on.
 How close each event gets to a competition scramble varies, and it is worth
 being plain about it:
 
+- **2x2, Pyraminx and Skewb** are random-state, which is the method the WCA
+  uses. See below for what that means.
 - **Clock** is exactly official. Its dials commute, so drawing each one at
   random already gives a uniformly random state, which is all the official
   generator does.
@@ -21,14 +23,55 @@ being plain about it:
   the same rules.
 - **5x5, 6x6 and 7x7** use the same random-move generation the official scramble
   program uses, with the same move pools and lengths.
-- **2x2, 3x3, 4x4, Pyraminx, Skewb and Square-1** are honest practice
-  approximations. Official scrambles for these are generated from a random
-  state and solved back into moves; Cubetimer picks the moves and takes whatever
-  state comes out. The lengths match real scrambles and they are perfectly good
-  to train on, but they are not competition-legal.
+- **3x3, 4x4 and Square-1** are honest practice approximations. Official
+  scrambles for these are generated from a random state and solved back into
+  moves; Cubetimer picks the moves and takes whatever state comes out. The
+  lengths match real scrambles and they are perfectly good to train on, but they
+  are not competition-legal.
 - **One-handed** is 3x3, scrambled by the very same generator and inheriting
   exactly the same caveat. The WCA scrambles it the same way; the event is the
   hand you are not using, not the cube.
+
+## What random-state means for 2x2, Pyraminx and Skewb
+
+A random-move scramble picks eleven legal moves and hands you whatever position
+falls out. That sounds fair and is not, because some positions can be reached by
+far more sequences than others, so the easy ones come up more often than they
+should. A random-state scramble works the other way round: it picks the position
+first, uniformly, so **every legal state of the puzzle is exactly as likely as
+every other**, and only then works out the moves that produce it.
+
+Cubetimer can do that for these three events because they are small enough to
+solve completely. It knows the exact number of moves every position of a 2x2,
+Pyraminx and Skewb needs, all 3,674,160, 933,120 and 3,149,280 of them, so it
+draws a position, solves it, and writes the solution backwards.
+
+What you see follows from that:
+
+- **Every scramble is exactly eleven moves**, for all three events, whatever the
+  position actually needs. Most positions can be solved in eight or nine, so the
+  solution is deliberately searched for at eleven instead. That is what official
+  scrambles do too, and it is why real 2x2 scrambles are always eleven moves
+  long.
+- **Notation is unchanged.** 2x2 is still `U R F` with `'` and `2`, Skewb is
+  still `R U L B` with `'`, and Pyraminx is still `U L R B` with `'`.
+- **Pyraminx tips still come last**, in `u l r b` order, one token per unsolved
+  tip. A tip turns on its own and does not affect anything else, so it is drawn
+  separately: a random tip is already solved one time in three and contributes no
+  move, which is why a scramble carries anywhere from zero to four of them.
+
+The remaining nine events stay random-move for now. Adding a fourth event to the
+random-state three means solving that puzzle exhaustively, and a 3x3 alone has 43
+quintillion states, which is a different kind of program.
+
+### The pause on the first scramble of an event
+
+The move tables and the solved-distance table are built the first time you
+scramble that event, not at startup, so the cost is paid once per run and only
+for the events you actually use. It is a fraction of a second for Pyraminx,
+about half a second for 2x2, and a little over a second for Skewb, whose table
+covers nine million positions. Nothing is written to disk, so the next run pays
+it again, and every scramble after the first is instant.
 
 ## Seeing the cube first
 
