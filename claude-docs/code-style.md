@@ -291,8 +291,8 @@ there leaves the terminal in raw mode with no cursor. In practice:
 
 ## Prose in the repo
 
-Rule 4 applies to everything a human reads: `README.md`, `claude-docs/*`, doc comments,
-status messages, commit subjects.
+Rule 4 applies to everything a human reads: `README.md`, `docs/*`, `claude-docs/*`, doc
+comments, status messages, commit subjects.
 
 - Cubetimer when writing about the product, cubetimer for the binary, the crate, the data
   directory and anything else that is literally typed.

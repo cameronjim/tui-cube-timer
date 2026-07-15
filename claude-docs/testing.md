@@ -358,5 +358,6 @@ Say you add a `/scramble <text>` command that overrides the current scramble.
    relevant field. If there is no field to write into, that is the design telling you to add
    one.
 
-8. **Run the bar.** `cargo test` and `cargo clippy --all-targets`, then update `README.md`
-   because a new command is user-visible.
+8. **Run the bar.** `cargo test` and `cargo clippy --all-targets`, then document it because
+   a new command is user-visible: the commands table in `README.md`, and the `docs/` page
+   for whatever the command does.
