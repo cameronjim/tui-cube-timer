@@ -5,7 +5,7 @@
 The scramble sits across the top in bold, and the border above it tells you
 which puzzle you are on, which session you are in, and whether inspection is
 turned on. The big block digits in the middle are the timer. Underneath them is
-a strip with your averages and personal bests, and the column on the right is
+a strip with this session's averages and bests, and the column on the right is
 your times list, newest at the top, with the best of the session in green and
 the worst in red. The line along the bottom is your status line: it shows a
 hint most of the time, the result of your last command after you run one, and

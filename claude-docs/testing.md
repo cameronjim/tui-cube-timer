@@ -13,7 +13,7 @@ with no tests at all.
 They come apart cleanly once the code is split by responsibility, which is why rule 2 and
 rule 1 support each other:
 
-- **Pure logic** (averages, personal bests, scramble legality, time formatting) is a
+- **Pure logic** (averages, session bests, scramble legality, time formatting) is a
   function of its arguments. It needs no scaffolding whatsoever, so it gets tested
   exhaustively, including the ugly boundaries.
 - **The state machine** is the interesting part, and the trick is that it does not read the
@@ -48,11 +48,11 @@ testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `r
 testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for all
 three renderers. Never duplicate a helper across sibling files.
 
-Current state, 370 tests, all green:
+Current state, 392 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
+| `stats.rs` | 45 | Trimmed averages, penalties, session stats, session bests |
 | `app/commands.rs` | 49 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
 | `app/mod.rs` | 43 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
 | `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
@@ -60,14 +60,14 @@ Current state, 370 tests, all green:
 | `app/selection.rs` | 21 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
-| `cstimer.rs` | 16 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
-| `ui/mod.rs` | 11 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing |
+| `cstimer.rs` | 21 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
+| `ui/mod.rs` | 12 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing, the best row's scope |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
 | `ui/overlay.rs` | 19 | All four popups at four sizes, clamping, the cursor, which one wins, the trend graph's glyphs and y domain |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
-| `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the personal-best banner |
+| `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the session-best banner |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
 | `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
@@ -97,7 +97,6 @@ fn s(ms: u64) -> Solve { /* clean solve */ }
 fn plus2(ms: u64) -> Solve { /* +2 penalty */ }
 fn dnf(ms: u64) -> Solve { /* DNF */ }
 fn solves(times: &[u64]) -> Vec<Solve>
-fn session(id: u64, times: &[u64]) -> Session
 ```
 
 With those in place a WCA rule becomes one legible line, and the expected value is written
@@ -111,7 +110,7 @@ assert_eq!(average_of(100, &v), AvgResult::Time(expected));
 Cover the boundaries, not just the happy path: exactly `n` solves, one fewer than `n`,
 `n == 0`, windows too small to survive trimming, exactly the DNF allowance, one over it,
 truncation that is not rounding. The `stats.rs` module is grouped by banner comments
-(`// ---- ao5`, `// ---- personal bests`) so a reader can see which areas have coverage.
+(`// ---- ao5`, `// ---- session bests`) so a reader can see which areas have coverage.
 
 `storage.rs` tests the file layer against real files in the system temp directory, using an
 RAII guard so nothing survives the run. Migrations are tested from hand-written JSON string
@@ -282,9 +281,10 @@ nothing cannot pass the whole file.
 A handful of tests go past the anchor, and they are the ones where a wrong cell means a
 wrong reading rather than an ugly one: `cells_colored` and `row_cells` let `ui/timer.rs`
 assert that stage 1 recolours the countdown *and* draws `8s` in that same colour, and that a
-`+2` takes the slot and the red back off it, and that a personal-best banner turns the
+`+2` takes the slot and the red back off it, and that a session-best banner turns the
 digits under it light green while a running inspection is left alone; `rows_of` lets
-`ui/mod.rs` assert the three stats rows start their values in the same column. `ui/overlay.rs`
+`ui/mod.rs` assert the three stats rows start their values in the same column, and that a
+second session of the same puzzle changes none of them. `ui/overlay.rs`
 goes furthest, because the trend graph is the one widget whose glyphs are a compatibility
 contract: it sweeps every cell inside the popup border and fails on anything that is neither
 ASCII nor one of the six CP437 characters the chart is allowed to draw. Colour, column

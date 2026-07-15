@@ -2,7 +2,7 @@
 //!
 //! The four clusters that answer their own question live beside this file: [`commands`] runs
 //! the `/command` line, [`selection`] owns the times cursor and the two list overlays,
-//! [`progress`] owns the trend and the personal-best celebration, and [`repair`] makes a
+//! [`progress`] owns the trend and the session-best celebration, and [`repair`] makes a
 //! parsed save file internally consistent.
 
 mod commands;
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::scramble;
-use crate::stats::{self, PersonalBests, SessionStats};
+use crate::stats::{self, SessionBests, SessionStats};
 use crate::storage;
 use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve};
 
@@ -84,16 +84,20 @@ pub struct App {
     pub data_path: PathBuf,
     /// Statistics for the active session, cached by [`App::refresh_derived`].
     pub stats: SessionStats,
-    /// All-time bests across every session of the active puzzle, cached by [`App::refresh_derived`].
-    pub pbs: PersonalBests,
+    /// Best single and best rolling window of the active session, cached by
+    /// [`App::refresh_derived`].
+    ///
+    /// Scoped to that one session: a faster time in another session of the same puzzle is
+    /// another context's number and never reaches this row.
+    pub bests: SessionBests,
     /// Effective times of the last [`TREND_LEN`](progress::TREND_LEN) solves of the active
     /// session, oldest first.
     ///
     /// DNFs are dropped, so this is shorter than the window it covers whenever one is in range.
     pub trend: Vec<u64>,
-    /// The personal-best celebration currently on screen, cleared after
-    /// [`PB_BANNER`](progress::PB_BANNER).
-    pub pb_banner: Option<String>,
+    /// The session-best celebration currently on screen, cleared after
+    /// [`BEST_BANNER`](progress::BEST_BANNER).
+    pub best_banner: Option<String>,
 
     // --- internal bookkeeping (not part of the ui contract) ---
     /// Inspection start, kept while armed so an aborted arm restores the countdown.
@@ -102,7 +106,7 @@ pub struct App {
     inert_key: Option<KeyCode>,
     /// When the last solve was finalized; space is ignored for `STOP_COOLDOWN` after it.
     stopped_at: Option<Instant>,
-    /// When the current [`App::pb_banner`] went up; `on_tick` retires it five seconds later.
+    /// When the current [`App::best_banner`] went up; `on_tick` retires it five seconds later.
     banner_since: Option<Instant>,
 }
 
@@ -136,9 +140,9 @@ impl App {
             inspection_stage: 0,
             data_path,
             stats: SessionStats::default(),
-            pbs: PersonalBests::default(),
+            bests: SessionBests::default(),
             trend: Vec::new(),
-            pb_banner: None,
+            best_banner: None,
             inspection_start: None,
             inert_key: None,
             stopped_at: None,
@@ -150,22 +154,17 @@ impl App {
 
     /// Recompute the statistics and the trend `ui` renders from.
     ///
-    /// They walk every solve of the puzzle, so the 15 ms draw loop must never call them.
-    /// Every path that changes the solve list, a penalty, the session list or the active
-    /// session calls this instead; `/rename` is the one mutation that changes neither.
+    /// All three read the active session and nothing else, so every number beside its times
+    /// list describes that list. They walk every solve of it, so the 15 ms draw loop must
+    /// never call them. Every path that changes the solve list, a penalty, the session list
+    /// or the active session calls this instead; `/rename` is the one mutation that changes
+    /// neither.
     fn refresh_derived(&mut self) {
-        let puzzle = self.current_session().puzzle;
         let stats = stats::session_stats(&self.current_session().solves);
-        let of_puzzle: Vec<&Session> = self
-            .save
-            .sessions
-            .iter()
-            .filter(|s| s.puzzle == puzzle)
-            .collect();
-        let pbs = stats::personal_bests(&of_puzzle);
+        let bests = stats::session_bests(&self.current_session().solves);
         let trend = progress::trend_of(&self.current_session().solves);
         self.stats = stats;
-        self.pbs = pbs;
+        self.bests = bests;
         self.trend = trend;
     }
 
@@ -262,7 +261,7 @@ impl App {
         self.state = TimerState::Timing {
             started: Instant::now(),
         };
-        self.clear_pb_banner();
+        self.clear_best_banner();
         self.inspection_start = None;
         self.inspection_remaining = None;
         self.inspection_stage = 0;
@@ -273,8 +272,8 @@ impl App {
     /// Record the running solve, persist, and return to Idle with a fresh scramble.
     fn finish_solve(&mut self, started: Instant) {
         let millis = started.elapsed().as_millis() as u64;
-        // The records to beat, read before this solve joins them.
-        let (prev_single, prev_ao5) = (self.pbs.single, self.pbs.ao5);
+        // The session records to beat, read before this solve joins them.
+        let (prev_single, prev_ao5) = (self.bests.single, self.bests.ao5);
         let solve = Solve {
             millis,
             penalty: self.pending_inspection_penalty,
@@ -292,7 +291,7 @@ impl App {
         self.stopped_at = Some(Instant::now());
         self.new_scramble();
         self.refresh_derived();
-        self.note_pb(prev_single, prev_ao5);
+        self.note_best(prev_single, prev_ao5);
         self.save_now();
     }
 
@@ -305,7 +304,7 @@ impl App {
     // ------------------------------------------------------------------- tick
 
     pub fn on_tick(&mut self) {
-        self.expire_pb_banner();
+        self.expire_best_banner();
         match self.state {
             TimerState::Idle => {}
             TimerState::Inspecting { started } => {
@@ -1141,20 +1140,17 @@ mod tests {
 
     /// Assert the cached statistics still equal a fresh computation over the same data.
     fn assert_cache_is_fresh(app: &App, when: &str) {
-        let fresh = stats::session_stats(&app.current_session().solves);
-        assert_eq!(app.stats, fresh, "app.stats went stale {}", when);
-
-        let puzzle = app.current_session().puzzle;
-        let of_puzzle: Vec<&Session> = app
-            .save
-            .sessions
-            .iter()
-            .filter(|s| s.puzzle == puzzle)
-            .collect();
+        let solves = &app.current_session().solves;
         assert_eq!(
-            app.pbs,
-            stats::personal_bests(&of_puzzle),
-            "app.pbs went stale {}",
+            app.stats,
+            stats::session_stats(solves),
+            "app.stats went stale {}",
+            when
+        );
+        assert_eq!(
+            app.bests,
+            stats::session_bests(solves),
+            "app.bests went stale {}",
             when
         );
     }
@@ -1175,7 +1171,7 @@ mod tests {
             "six solves is enough for an ao5, got {:?}",
             app.stats.ao5
         );
-        assert!(app.pbs.single.is_some(), "a solve sets a PB single");
+        assert!(app.bests.single.is_some(), "a solve sets a best single");
     }
 
     #[test]
@@ -1212,17 +1208,22 @@ mod tests {
         assert_eq!(app.stats.worst, Some(11_000));
         assert_cache_is_fresh(&app, "after /del");
 
-        // A second session of the same puzzle holds the PB, so deleting it must move the PB.
+        // A second session of the same puzzle brings its own bests with it, and takes them away
+        // again when it goes.
         run_command(&mut app, "new fast");
         for ms in [1_000, 1_100, 1_200, 1_300, 1_400] {
             add_solve(&mut app, ms);
         }
         run_command(&mut app, "del");
-        assert_eq!(app.pbs.single, Some(1_000));
+        assert_eq!(app.bests.single, Some(1_000));
         assert_cache_is_fresh(&app, "in the second session");
 
         run_command(&mut app, "delsession");
-        assert_eq!(app.pbs.single, Some(10_000), "the fast session's PB is gone");
+        assert_eq!(
+            app.bests.single,
+            Some(10_000),
+            "the bests are the surviving session's own again"
+        );
         assert_cache_is_fresh(&app, "after /delsession");
     }
 
@@ -1243,7 +1244,7 @@ mod tests {
 
         run_command(&mut app, "2x2");
         assert_eq!(app.stats.count, 0, "2x2 has its own empty default");
-        assert_eq!(app.pbs.single, None, "and its own PBs");
+        assert_eq!(app.bests.single, None, "and its own bests");
         assert_cache_is_fresh(&app, "after /2x2");
 
         run_command(&mut app, "3x3");
@@ -1257,14 +1258,18 @@ mod tests {
         add_solve(&mut app, 10_000);
         run_command(&mut app, "ok");
 
-        // An empty user session retypes in place, which changes which sessions the PBs span.
+        // An empty user session retypes in place rather than switching away, so the cache has
+        // to follow a puzzle change that never moves the active session.
         run_command(&mut app, "new scratch");
         assert_cache_is_fresh(&app, "in the new 3x3 session");
-        assert_eq!(app.pbs.single, Some(10_000), "3x3 PBs still include the default");
+        assert_eq!(
+            app.bests.single, None,
+            "a fresh session has no bests of its own yet"
+        );
 
         run_command(&mut app, "megaminx");
         assert_eq!(app.current_session().puzzle, Puzzle::Megaminx, "retyped in place");
-        assert_eq!(app.pbs.single, None, "Megaminx has no times yet");
+        assert_eq!(app.bests.single, None, "and it still has no times");
         assert_cache_is_fresh(&app, "after retyping onto Megaminx");
     }
 

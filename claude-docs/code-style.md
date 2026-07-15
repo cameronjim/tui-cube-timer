@@ -20,7 +20,7 @@ family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and o
 block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
 geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
 command mode, `app/selection.rs` owns the times cursor and all four overlays,
-`app/progress.rs` owns the trend and the personal-best celebration, and `app/repair.rs`
+`app/progress.rs` owns the trend and the session-best celebration, and `app/repair.rs`
 repairs a save file. A directory is still one module for the purposes of this document: the
 boundary rules below apply to `ui/` as a whole, not to each file inside it, and the same
 goes for `app/`.
@@ -66,18 +66,18 @@ places, and makes the state machine untestable without a renderer. If the UI nee
 derived value, add a field to `App` and refresh it where the state changes.
 
 The same rule covers statistics, and there it also guards a performance cliff. `App::stats`
-and `App::pbs` are refreshed by `App::refresh_derived` at every mutation site, and the
+and `App::bests` are refreshed by `App::refresh_derived` at every mutation site, and the
 renderer reads them:
 
 ```rust
 // ui/mod.rs
 let st = &app.stats;
-let pb = &app.pbs;
+let best = &app.bests;
 ```
 
-Calling `stats::personal_bests` from `draw` instead would put a walk over every solve of
-every session of the puzzle inside a loop that runs every 15 ms. Anything the renderer needs
-that is not `O(what is on screen)` belongs in a cached field.
+Calling `stats::session_bests` from `draw` instead would put a walk over every solve of the
+session inside a loop that runs every 15 ms. Anything the renderer needs that is not
+`O(what is on screen)` belongs in a cached field.
 
 ### One owner per decision
 
@@ -121,7 +121,7 @@ answers "is this save file internally consistent" as free functions over `&mut S
 `commands.rs` owns command mode behind the single `on_command_key` entry point,
 `selection.rs` owns which solve or session you are pointing at and which overlay is up,
 neither of which the timer asks,
-`progress.rs` owns how the session is going, which is the trend and the personal-best
+`progress.rs` owns how the session is going, which is the trend and the session-best
 celebration, and `mod.rs` keeps the state machine. Every one of those splits made the code
 more testable, which is the sign you cut in the right place.
 
@@ -135,11 +135,11 @@ A third habit is worth naming from the splits that produced `app/selection.rs`,
 child keeps everything behind it. `on_key_idle` hands its cursor keys to
 `selection::on_key_times` rather than importing `TIMES_PAGE` back out, `draw_body` calls
 `timer::draw_timer` rather than knowing what `GLYPH_H` is, and `on_tick` calls
-`expire_pb_banner` rather than knowing that the banner lasts five seconds. A constant that
+`expire_best_banner` rather than knowing that the banner lasts five seconds. A constant that
 has to travel back up to the parent is a sign the cut was made one function too deep.
 
 No file in `src/` is over the line now, but one is close enough to name. `app/mod.rs` is at
-493 non-test lines after the trend, the personal-best banner and the overlay toggles moved
+492 non-test lines after the trend, the session-best banner and the overlay toggles moved
 out to `app/progress.rs` and `app/selection.rs`, which is under 500 with nothing to spare;
 the next cut there is the inspection cluster, meaning the five `INSPECTION_*` constants with
 `start_inspection`, `cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind

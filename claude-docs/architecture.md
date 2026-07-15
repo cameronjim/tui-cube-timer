@@ -6,7 +6,7 @@ document explains how the program is put together: what each module owns, how a 
 gets on screen, how key events become timer transitions, and how solves reach disk.
 
 The companion document [algorithms.md](algorithms.md) covers the maths: WCA trimmed
-averages, personal bests, scramble generation and inspection penalties. Project-level
+averages, session bests, scramble generation and inspection penalties. Project-level
 conventions live in [../CLAUDE.md](../CLAUDE.md); code style rules are in
 [code-style.md](code-style.md) and the testing policy is in [testing.md](testing.md).
 
@@ -25,7 +25,7 @@ deliberate: `stats`, `scramble` and `cstimer` are pure and know nothing about te
 | `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `scramble`, `stats`, `storage`, `types` |
 | `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `types` |
 | `src/scramble/` | Scramble generation per puzzle | `types`, `rand` |
-| `src/stats.rs` | Averages, session summaries, personal bests | `types` |
+| `src/stats.rs` | Averages, session summaries, session bests | `types` |
 | `src/cstimer.rs` | Conversion between `SaveFile` and csTimer's export format, both directions | `types`, `serde_json` |
 | `src/storage.rs` | Data file location, JSON load and atomic save, format migration, wall clock | `types` |
 | `src/types.rs` | `Puzzle`, `Penalty`, `Solve`, `Session`, `Settings`, `SaveFile`, the default-session ids, time and date formatting | serde only |
@@ -63,7 +63,7 @@ is what makes the degradation rules testable as ordinary functions rather than b
 | File | Covers | Non-test lines |
 | --- | --- | --- |
 | `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 380 |
-| `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
+| `timer.rs` | `timer_view`, `draw_timer`, the session-best banner, `GLYPH_H` and the 5-row block font | 207 |
 | `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_detail`, `trend_plot` | 391 |
 | `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 280 |
 
@@ -74,7 +74,7 @@ the single `pub(super) fn on_command_key` and never touched from outside `app`.
 overlay is up, none of which the timer reads: the times cursor, the solve-detail overlay,
 the sessions picker and the two non-modal toggles behind `/help` and `/trend`.
 `progress.rs` answers "how is this session going", which is the trend window and the
-personal-best celebration, neither of which is timer state. `repair.rs` answers "is this
+session-best celebration, neither of which is timer state. `repair.rs` answers "is this
 save file internally consistent", which nothing in the timer flow ever asks, and is a
 handful of free functions over `&mut SaveFile` rather than `App` methods. The split is
 invisible from outside: `crate::app::App` and its public fields and methods keep the paths
@@ -86,7 +86,7 @@ they had when `app` was one file.
 | `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 432 |
 | `selection.rs` | `toggle_help`, `toggle_trend`, `close_popups`, `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 150 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
-| `progress.rs` | `trend_of`, `pb_banner_text`, `note_pb`, `clear_pb_banner`, `expire_pb_banner` | 76 |
+| `progress.rs` | `trend_of`, `best_banner_text`, `note_best`, `clear_best_banner`, `expire_best_banner` | 77 |
 | `testkit.rs` | `#[cfg(test)]` scaffolding the other five share: `TempPath`, `test_app`, `press`, `run_command` | 147 |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
@@ -98,9 +98,9 @@ Three rules keep the seams clean:
 
 1. **`ui` never does `Instant` math.** Anything time-derived that the renderer needs
    is precomputed into plain fields on `App` (`display_millis`, `inspection_remaining`,
-   `pending_inspection_penalty`, `inspection_stage`, `pb_banner`) by `App::on_tick` or by a
-   state transition. The renderer reads numbers, not clocks.
-2. **`ui` never computes statistics either.** `App::stats` and `App::pbs` are cached and
+   `pending_inspection_penalty`, `inspection_stage`, `best_banner`) by `App::on_tick` or by
+   a state transition. The renderer reads numbers, not clocks.
+2. **`ui` never computes statistics either.** `App::stats` and `App::bests` are cached and
    the renderer reads them. See below for why this is a rule and not a preference.
 3. **`app` never draws and `ui` never mutates.** `draw(frame: &mut Frame, app: &App)`
    takes a shared reference, so the type system enforces it.
@@ -112,21 +112,30 @@ Three rules keep the seams clean:
 ```rust
 /// Statistics for the active session, cached by `App::refresh_derived`.
 pub stats: SessionStats,
-/// All-time bests across every session of the active puzzle, cached by `App::refresh_derived`.
-pub pbs: PersonalBests,
+/// Best single and best rolling window of the active session, cached by `App::refresh_derived`.
+pub bests: SessionBests,
 ```
 
-`App::refresh_derived` recomputes both, and every path that changes the solve list, a
+Both describe the active session and nothing else. `refresh_derived` calls
+`stats::session_stats`, `stats::session_bests` and `progress::trend_of` on one solve list,
+the active session's, so the whole panel beside the times list is about the times in it. A
+faster solve in another session, including another session of the same puzzle, belongs to
+that session; `bests` used to be a `PersonalBests` taken across every session of the puzzle,
+and a csTimer import that created a second 3x3 session was enough to make the best row
+describe times the user could not see. See [algorithms.md](algorithms.md) for the fuller
+argument.
+
+`App::refresh_derived` recomputes all three, and every path that changes the solve list, a
 penalty, the session list or the active session calls it. `App::new` calls it once after
 `sanitize`. `/rename` is the only mutation that skips it, because a name changes no
 number.
 
 This started as rule 2 of `CLAUDE.md`: `stats.rs` is pure, `app` owns state, and a
-renderer that calls `stats::personal_bests` is a renderer doing work that is not
-rendering. It became load bearing for a second reason. `personal_bests` walks every solve
-of every session of the active puzzle and re-sorts a sliding window at each step, once for
-every average it tracks and now up to a thousand solves wide, so calling it from `draw` put
-an unbounded amount of work inside a loop that runs every 15 ms. A save file with enough solves in it, whether from years of practice or from a
+renderer that calls `stats::session_bests` is a renderer doing work that is not
+rendering. It became load bearing for a second reason. `session_bests` walks every solve of
+the session and re-sorts a sliding window at each step, once for every average it tracks and
+now up to a thousand solves wide, so calling it from `draw` put an unbounded amount of work
+inside a loop that runs every 15 ms. A save file with enough solves in it, whether from years of practice or from a
 hand-edited file, could take longer than a frame to render and leave the terminal
 unresponsive with no way out. Caching moves that cost to the handful of moments when the
 numbers actually change, which is at most once per solve.
@@ -134,7 +143,7 @@ numbers actually change, which is at most once per solve.
 The 64 MB read limit in `storage::load`, described under Persistence, is the other half
 of the same fix: it bounds how large the input can be before any of this runs.
 
-### The trend window and the personal-best banner
+### The trend window and the session-best banner
 
 Two more read-only fields exist for the same reason, and both live behind
 `app/progress.rs`:
@@ -142,8 +151,8 @@ Two more read-only fields exist for the same reason, and both live behind
 ```rust
 /// Effective times of the last `TREND_LEN` solves of the active session, oldest first.
 pub trend: Vec<u64>,
-/// The personal-best celebration currently on screen, cleared after `PB_BANNER`.
-pub pb_banner: Option<String>,
+/// The session-best celebration currently on screen, cleared after `BEST_BANNER`.
+pub best_banner: Option<String>,
 ```
 
 `trend` is what `ui::overlay::draw_trend` plots, through `trend_plot` into a ratatui `Chart`.
@@ -153,10 +162,10 @@ absent rather than zero. It is refreshed by `refresh_derived` alongside the stat
 exactly the same set of mutations, which is why a penalty change or a session switch moves
 the line immediately, whether the popup is open at the time or not.
 
-`pb_banner` is the celebration line, and `banner_since` beside it is the private `Instant`
-that retires it. `finish_solve` reads `pbs.single` and `pbs.ao5` *before* the new solve
-joins them, calls `refresh_derived`, and then calls `note_pb` with the two old values;
-`pb_banner_text` compares old against new and names each one the solve strictly beat:
+`best_banner` is the celebration line, and `banner_since` beside it is the private `Instant`
+that retires it. `finish_solve` reads `bests.single` and `bests.ao5` *before* the new solve
+joins them, calls `refresh_derived`, and then calls `note_best` with the two old values;
+`best_banner_text` compares old against new and names each one the solve strictly beat:
 
 ```rust
 fn improved(prev: Option<u64>, now: Option<u64>) -> Option<u64> {
@@ -167,13 +176,15 @@ fn improved(prev: Option<u64>, now: Option<u64>) -> Option<u64> {
 }
 ```
 
-The `Some(p)` is the rule that keeps a first-ever record quiet: there was nothing to beat,
-so nothing is celebrated. The strict `<` is the rule that keeps an equalled record quiet
-too. Because the comparison runs against `App::pbs`, which `refresh_derived` builds from
-the sessions of the active puzzle only, a 2x2 record can never raise the banner on 3x3.
+The `Some(p)` is the rule that keeps the first record of a session quiet: there was nothing
+to beat, so nothing is celebrated. The strict `<` is the rule that keeps an equalled record
+quiet too. Because the comparison runs against `App::bests`, which `refresh_derived` builds
+from the active session alone, a record set in any other session, on this puzzle or another,
+can never raise the banner here. The banner text says `new best`, not `new pb`, for the same
+reason.
 
-The banner comes down two ways: `expire_pb_banner`, called first thing in `on_tick`, drops
-it once `PB_BANNER` of five seconds has passed, and `start_timing` drops it because the
+The banner comes down two ways: `expire_best_banner`, called first thing in `on_tick`, drops
+it once `BEST_BANNER` of five seconds has passed, and `start_timing` drops it because the
 next solve has begun. Arming does not, so glancing at the banner and reaching for the space
 bar does not cost you the rest of the five seconds. `ui::timer` reads the field twice, once
 for the bold black-on-light-green line it inserts above the digits and once to colour the
@@ -422,7 +433,7 @@ pending inspection penalty, the scramble that was on screen and a wall-clock tim
 from `storage::now_millis()`, pushes it onto the active session, clears the pending
 penalty, sets `display_millis` to the final time so the frozen result stays on screen,
 stamps `stopped_at`, generates a fresh scramble, refreshes the derived fields, raises the
-personal-best banner if the solve earned one, and writes the save file. The order of the
+session-best banner if the solve earned one, and writes the save file. The order of the
 last three matters: the banner is decided by comparing the records read before the push
 against the ones `refresh_derived` has just recomputed.
 
@@ -625,8 +636,8 @@ puzzle, all named `default`, in the order given by `Puzzle::DEFAULT_ORDER`:
 3x3 comes first because it is the common case; the six cubes keep the ids they held
 before the five WCA events were added, so no existing 3x3 or 7x7 history has to move, and
 one-handed took the next free id after them for the same reason. `Puzzle::Oh` is a full
-event rather than a mode: it has its own default session, its own solve list and therefore
-its own personal bests, and it is only the scramble generator it shares with `Puzzle::Cube3`.
+event rather than a mode: it has its own default session and its own solve list, and it is
+only the scramble generator it shares with `Puzzle::Cube3`.
 `Puzzle::default_session_id` is that mapping, `FIRST_USER_ID` is 13, and
 `Session::is_default` is the single predicate everything else asks (`id < FIRST_USER_ID`).
 A default cannot be deleted, renamed or retyped; its solves behave like any others. The
@@ -905,7 +916,7 @@ panic and without a blank screen:
   the width of `current`, the longest of the three prefixes) plus a space: `current` over
   `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
   `best single, worst single, mean, solves`, then `best` over the same five windows again,
-  this time the all-time personal bests from `App::pbs`. The middle row pays for the
+  this time the session bests from `App::bests`. The middle row pays for the
   column it does not use, because the three only read as a block if their values start in
   the same place, and `stat_budget` is where that toll is taken out of the width before
   anything is packed. A row never wraps into the one below it, so `fit_count` decides how
@@ -913,8 +924,8 @@ panic and without a blank screen:
   averages row runs smallest window first, which is also the order in which the numbers
   start existing as a session grows, so what a narrow terminal keeps is what a short session
   actually has. Every label is unambiguous on its own: `current` and `best` are the two rows,
-  the top and bottom rows hold nothing but averages so a rolling one sits directly over its
-  personal best, and the session's own extremes in the middle spell out `best single` and
+  the top and bottom rows hold nothing but averages so a rolling one sits directly over the
+  best it has been, and the session's own extremes in the middle spell out `best single` and
   `worst single` rather than borrowing a row name. The wider prefix costs each row four
   columns of budget. At 80 the strip is 52 columns wide and each row packs into 44, which
   holds four averages or two of the longer session entries; by 44 columns the strip is 22
@@ -925,8 +936,8 @@ panic and without a blank screen:
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
   coloured line, so the time is always legible even in a two-row body.
-- **Personal-best banner**, the line `draw_timer` inserts above the digits while
-  `App::pb_banner` is `Some`, is added only when the panel has a row left after the digits
+- **Session-best banner**, the line `draw_timer` inserts above the digits while
+  `App::best_banner` is `Some`, is added only when the panel has a row left after the digits
   themselves, so it is the first thing the timer panel gives up and the time is never
   pushed off the screen by its own celebration.
 - **State caption**, the dim line under the digits that names what the timer is doing
@@ -1032,7 +1043,7 @@ already earned is never read as a judge call.
 
 ## See also
 
-- [algorithms.md](algorithms.md) for averages, personal bests, scramble generation and
+- [algorithms.md](algorithms.md) for averages, session bests, scramble generation and
   inspection penalty thresholds.
 - [../CLAUDE.md](../CLAUDE.md) for project-level guidance.
 - [code-style.md](code-style.md) for code style rules.
