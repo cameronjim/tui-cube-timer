@@ -14,8 +14,8 @@ use ratatui::widgets::{
 use ratatui::Frame;
 
 use super::layout::{
-    centered, detail_popup, inner_of, list_window, puzzle_help_rows, sessions_popup, trend_popup,
-    HELP_KEY_W, HELP_W, SESSIONS_NAME_W,
+    centered, detail_popup, docked_right, inner_of, list_window, puzzle_help_rows, sessions_popup,
+    trend_popup, HELP_KEY_W, HELP_W, SESSIONS_NAME_W,
 };
 use super::{dim, net, C_ACCENT, C_IDLE, C_INSPECT, C_TIMING, C_WORST};
 use crate::app::App;
@@ -347,18 +347,26 @@ const PREVIEW_MSG_W: u16 = 30;
 /// holds, so the mode is settled before the border is drawn: full size first, the half block
 /// compact net second, and the message box last. Unlike the trend graph the popup is never
 /// skipped outright, because "too small" is worth saying when the user just asked for it.
+///
+/// It docks against the right edge instead of centering, because the big countdown owns the
+/// center-left of the frame and the point of a preview is to read it beside the timer rather
+/// than over it. What the popup lands on is the stats strip and the times list, which a cuber
+/// inspecting a scramble can spare for a moment. The message box docks with the nets: it is not
+/// only the too-small case, it is also the five events with no cube model, and on a roomy
+/// terminal a centered `no preview for this event` would cover exactly the digits the dock
+/// exists to keep visible.
 fn preview_popup(n: Option<u8>, area: Rect) -> (Rect, Option<bool>) {
     if let Some(n) = n {
         for compact in [false, true] {
             let (w, h) = net::size(n, compact);
             let (want_w, want_h) = (w.saturating_add(2), h.saturating_add(2));
-            let popup = centered(want_w, want_h, area);
+            let popup = docked_right(want_w, want_h, area);
             if popup.width == want_w && popup.height == want_h {
                 return (popup, Some(compact));
             }
         }
     }
-    (centered(PREVIEW_MSG_W, 3, area), None)
+    (docked_right(PREVIEW_MSG_W, 3, area), None)
 }
 
 /// The scramble on screen as the cube it produces: six faces unfolded into a flat net.
@@ -1068,6 +1076,79 @@ mod tests {
         let text = render(&app, 40, 10);
         assert!(text.contains(" 7x7 preview "), "the popup is still titled");
         assert!(text.contains("terminal too small"));
+
+        // Whichever rung of the ladder it lands on, the popup is docked to the same edge.
+        for h in [30u16, 20] {
+            let (popup, _) = preview_popup(Some(7), Rect::new(0, 0, 80, h));
+            assert_eq!(popup.x + popup.width, 80, "{} rows broke the dock", h);
+        }
+    }
+
+    /// The dock as geometry: flush right, clear of the middle, at both sizes the ladder gives.
+    #[test]
+    fn the_preview_popup_docks_against_the_right_edge_beside_the_timer() {
+        // A 3x3 net is 27 by 11 in full mode and 27 by 8 in compact, plus a border each side.
+        let area = Rect::new(0, 0, 100, 35);
+        let (popup, mode) = preview_popup(Some(3), area);
+        assert_eq!(mode, Some(false), "a hundred by thirty-five holds the full net");
+        assert_eq!((popup.width, popup.height), (29, 13));
+        assert_eq!(popup.x + popup.width, area.width, "flush with the right edge");
+        assert!(
+            popup.x >= area.width / 2,
+            "and clear of the middle column, where the timer is: {:?}",
+            popup
+        );
+        assert_eq!(popup.y, (area.height - popup.height) / 2, "centered down the side");
+
+        // Twelve rows is one short of the full net and two over the compact one.
+        let area = Rect::new(0, 0, 100, 12);
+        let (popup, mode) = preview_popup(Some(3), area);
+        assert_eq!(mode, Some(true), "only the compact net fits a frame this short");
+        assert_eq!((popup.width, popup.height), (29, 10));
+        assert_eq!(popup.x + popup.width, area.width, "the dock holds at both sizes");
+        assert!(popup.x >= area.width / 2);
+
+        // The message box docks with them rather than landing back on the digits.
+        let (popup, mode) = preview_popup(None, Rect::new(0, 0, 100, 35));
+        assert_eq!(mode, None);
+        assert_eq!((popup.x + popup.width, popup.width), (100, PREVIEW_MSG_W));
+        assert!(popup.x >= 50, "an event with no model still says so off to the side");
+    }
+
+    /// What the dock is for, as an equality: opening the preview changes nothing to its left.
+    ///
+    /// The compared span is everything left of the popup, and the assertion above it is what
+    /// makes that span mean something: it has to reach the middle of the frame, so a popup that
+    /// went back to centering would fail here rather than quietly shrink what is checked.
+    #[test]
+    fn opening_the_preview_leaves_every_column_beside_it_untouched() {
+        let mut app = preview_of(Puzzle::Cube3, "R U R' U'");
+        let (popup, mode) = preview_popup(Some(3), Rect::new(0, 0, 100, 35));
+        assert_eq!(mode, Some(false), "the full net is what is being drawn over");
+        assert!(
+            popup.x >= 50,
+            "the untouched columns must cover the timer's half of the frame: {:?}",
+            popup
+        );
+
+        app.show_preview = false;
+        let closed = render_buffer(&app, 100, 35);
+        app.show_preview = true;
+        let open = render_buffer(&app, 100, 35);
+        assert_ne!(rows_of(&closed), rows_of(&open), "the preview did draw something");
+
+        for y in 0..35usize {
+            let (before, after) = (row_cells(&closed, y), row_cells(&open, y));
+            for x in 0..popup.x as usize {
+                assert_eq!(
+                    (before[x].symbol(), before[x].style()),
+                    (after[x].symbol(), after[x].style()),
+                    "cell ({}, {}) changed when the preview opened",
+                    x,
+                    y
+                );
+            }
+        }
     }
 
     #[test]

@@ -108,8 +108,8 @@ by eye.
 | --- | --- | --- |
 | `mod.rs` | `draw`, the palette, `panel`, the header, the stats strip, the times list and the status line | 384 |
 | `timer.rs` | `timer_view`, `draw_timer`, the session-best banner, `GLYPH_H` and the 5-row block font | 207 |
-| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_preview`, `draw_detail`, `trend_plot` | 456 |
-| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 280 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_trend`, `draw_preview`, `draw_detail`, `trend_plot` | 464 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 296 |
 | `net.rs` | `size` and `lines`: the net's footprint and its rows, full and compact | 155 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
@@ -1080,10 +1080,12 @@ panic and without a blank screen:
   `preview_popup` settles the mode before the border is drawn: it asks `net::size` for the full
   footprint (8n+3 by 3n+2), takes it if the border fits the area, falls back to the compact
   net's (8n+3 by 3·⌈n/2⌉+2), and drops to a `PREVIEW_MSG_W` (30) by 3 message box when neither
-  does. Unlike the trend graph it is never skipped outright, because the user just asked for it:
+  does. All three rungs are placed by `docked_right` rather than `centered`, so the popup hugs
+  the right edge over the stats and times panels instead of covering the timer's own column.
+  Unlike the trend graph it is never skipped outright, because the user just asked for it:
   a cube with nowhere to go says `terminal too small` and an event with no model says
-  `no preview for this event`, both centered and dim. The popup title carries the event name,
-  which is the one thing the net itself cannot say.
+  `no preview for this event`, both dim and centered inside the border. The popup title carries
+  the event name, which is the one thing the net itself cannot say.
 - **Solve-detail overlay** is `DETAIL_W` (52) columns and grows with the scramble it has to
   show: `detail_popup` runs the scramble through the same `scramble_rows` the header uses,
   adds `DETAIL_FIXED_ROWS` of 6 for the time, the date, the hint and the blanks between

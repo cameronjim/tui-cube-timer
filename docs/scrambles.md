@@ -79,9 +79,10 @@ it again, and every scramble after the first is instant.
 each sticker the colour it would be once you finished turning. It is the state
 the scramble in front of you leads to, not the state you are looking at, so it
 is a way to check your turning after the fact or to plan a cross before you
-start the timer. `/preview` again closes it, and so does `Esc`. It shares its
-slot with the help, the trend graph and the session picker: opening any of those
-closes it.
+start the timer. The net opens against the right side of the window, over the
+stats and times panels, so the big timer stays visible beside it. `/preview`
+again closes it, and so does `Esc`. It shares its slot with the help, the trend
+graph and the session picker: opening any of those closes it.
 
 The preview covers 2x2 through 7x7 and one-handed, which are the events
 Cubetimer has a cube model for. Pyraminx, Skewb, Megaminx, Square-1 and Clock

@@ -147,6 +147,22 @@ pub(super) fn centered(w: u16, h: u16, area: Rect) -> Rect {
     }
 }
 
+/// A rect of at most `w` x `h` flush with the right edge of `area`, centered down it.
+///
+/// The counterpart to [`centered`] for a popup that has to leave the middle of the frame
+/// alone. It degrades the same way and agrees with [`centered`] once `w` reaches the width
+/// of `area`, so a terminal too narrow to dock anything against loses nothing by asking.
+pub(super) fn docked_right(w: u16, h: u16, area: Rect) -> Rect {
+    let width = w.min(area.width);
+    let height = h.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width),
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 /// Where the solve-detail popup sits: as tall as its scramble needs, capped and clamped to `area`.
 pub(super) fn detail_popup(scramble: &str, area: Rect) -> Rect {
     let width = DETAIL_W.min(area.width);
@@ -706,5 +722,35 @@ mod tests {
         assert_eq!(centered(20, 10, Rect::new(0, 0, 80, 30)), Rect::new(30, 10, 20, 10));
         let clamped = centered(HELP_W, 40, Rect::new(0, 0, 10, 4));
         assert_eq!(clamped, Rect::new(0, 0, 10, 4), "the popup never exceeds the screen");
+    }
+
+    #[test]
+    fn docked_right_hugs_the_right_edge_and_centers_down_it() {
+        let area = Rect::new(0, 0, 100, 35);
+        let docked = docked_right(29, 13, area);
+        assert_eq!(docked, Rect::new(71, 11, 29, 13));
+        assert_eq!(docked.x + docked.width, area.width, "flush with the edge");
+        assert_eq!(docked.y, centered(29, 13, area).y, "and centered like the rest");
+
+        // An offset area is docked against its own right edge, not the screen's.
+        assert_eq!(docked_right(10, 4, Rect::new(20, 5, 40, 20)), Rect::new(50, 13, 10, 4));
+    }
+
+    #[test]
+    fn docked_right_shrinks_to_the_area_and_meets_centered_there() {
+        for (w, h) in [(0u16, 0u16), (1, 1), (10, 4), (29, 13), (200, 90)] {
+            let area = Rect::new(0, 0, w, h);
+            let docked = docked_right(29, 13, area);
+            assert!(
+                docked.x + docked.width <= w && docked.y + docked.height <= h,
+                "{:?} escapes {}x{}",
+                docked,
+                w,
+                h
+            );
+            if w <= 29 {
+                assert_eq!(docked, centered(29, 13, area), "nothing to dock against at {}", w);
+            }
+        }
     }
 }
