@@ -45,7 +45,8 @@ Orientation is "as the face appears on the unfolded cross net":
 - D: sits below F, so D's row 0 borders F, row n-1 borders B, col 0 borders L.
 
 Sticker colors in the UI (the map lives in `ui/net.rs`, never in `cube/`): U white,
-D yellow, F green, B blue, R red, L magenta (the terminal's stand-in for orange).
+D yellow, F green, B blue, R red, L orange. The 16-color palette carries no orange, so L
+is `C_ORANGE`, an RGB value and the only one the UI emits.
 
 ## Move semantics
 

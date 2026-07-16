@@ -84,6 +84,12 @@ stats and times panels, so the big timer stays visible beside it. `/preview`
 again closes it, and so does `Esc`. It shares its slot with the help, the trend
 graph and the session picker: opening any of those closes it.
 
+The colours are the standard scheme, white on top and yellow underneath, green in
+front and blue behind, red on the right and orange on the left. Orange is the one
+colour a terminal's basic palette does not carry, so Cubetimer asks for it by its
+RGB value; a terminal without RGB support approximates it with the nearest colour
+it has.
+
 The preview covers 2x2 through 7x7 and one-handed, which are the events
 Cubetimer has a cube model for. Pyraminx, Skewb, Megaminx, Square-1 and Clock
 say `no preview for <event> yet` and keep their scrambles unchanged; each is

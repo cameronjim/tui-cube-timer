@@ -138,10 +138,18 @@ fn merge(cells: Vec<(char, Style)>) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The L face's orange, the one truecolor value the UI emits.
+///
+/// Halfway between the palette's red and its yellow, which keeps it unmistakable against both
+/// of its neighbors on the net.
+const C_ORANGE: Color = Color::Rgb(255, 128, 0);
+
 /// The terminal color a face's stickers wear.
 ///
-/// Magenta stands in for orange, which the 16-color palette every console font agrees on does
-/// not carry. This map lives here and never in `cube`, which knows faces and not colors.
+/// Every color here comes from the 16-color palette except the L face, because that palette
+/// carries no orange. Windows 10's console and every modern terminal honor RGB, and one that
+/// cannot approximates it, which lands nearer a cube's orange than the magenta this used to
+/// draw. This map lives here and never in `cube`, which knows faces and not colors.
 fn color_of(face: Face) -> Color {
     match face {
         Face::U => Color::White,
@@ -149,7 +157,7 @@ fn color_of(face: Face) -> Color {
         Face::F => Color::Green,
         Face::B => Color::Blue,
         Face::R => Color::Red,
-        Face::L => Color::Magenta,
+        Face::L => C_ORANGE,
     }
 }
 
@@ -242,7 +250,18 @@ mod tests {
         assert_eq!(color_of(Face::F), Color::Green);
         assert_eq!(color_of(Face::B), Color::Blue);
         assert_eq!(color_of(Face::R), Color::Red);
-        assert_eq!(color_of(Face::L), Color::Magenta);
+        assert_eq!(color_of(Face::L), C_ORANGE);
+    }
+
+    #[test]
+    fn the_l_face_is_a_true_orange_and_the_only_color_off_the_palette() {
+        assert_eq!(C_ORANGE, Color::Rgb(255, 128, 0));
+        for face in [Face::U, Face::D, Face::F, Face::B, Face::R] {
+            assert!(
+                !matches!(color_of(face), Color::Rgb(..)),
+                "{face:?} should stay on the 16-color palette"
+            );
+        }
     }
 
     // ---- placement
