@@ -48,40 +48,45 @@ testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `r
 `app/`, and a private `mod testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render`
 and `render_all` for all three renderers. Never duplicate a helper across sibling files.
 
-Current state, 485 tests, all green:
+Current state, 544 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
 | `app/commands.rs` | 52 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
 | `stats.rs` | 45 | Trimmed averages, penalties, session stats, session bests |
-| `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
-| `app/mod.rs` | 37 | State machine, keys, the stop guards, the derived caches, the preview cube behind the scramble |
+| `ui/layout.rs` | 42 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
+| `app/mod.rs` | 38 | State machine, keys, the stop guards, the derived caches, the preview cube behind the scramble |
 | `cube/mod.rs` | 34 | Move orders and identities at every size and width, colour conservation, direction pins, inversion, parse errors |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
-| `ui/overlay.rs` | 25 | All five popups at four sizes, clamping, the cursor, which one wins, the trend graph's y domain, the net drawn from a known scramble, both glyph sweeps |
+| `ui/overlay.rs` | 27 | All five popups at four sizes, clamping, the cursor, which one wins, the trend graph's y domain, the net drawn from a known scramble, both glyph sweeps |
 | `app/selection.rs` | 23 | The times cursor, the solve-detail overlay, the sessions picker and its modality, the overlay exclusions |
 | `cstimer.rs` | 21 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
-| `ui/net.rs` | 15 | The footprint formulas, the colour map, face placement, compact pairing, the glyph set |
+| `ui/net.rs` | 16 | The footprint formulas, the colour map, face placement, compact pairing, the glyph set |
 | `solver/cube2.rs` | 15 | The depth distribution, both coordinates, the move tables, emission shape, the cross-model pin against `cube` |
 | `solver/skewb.rs` | 13 | The depth distribution, the reachable third and what pins it, TNoodle's facelet cycles, emission shape |
 | `solver/pyraminx.rs` | 13 | The depth distribution, the unreachable odd half, TNoodle's edge cycles, tips, emission shape |
+| `solver/cube3/cubies.rs` | 13 | Move orders and inverses, the three invariants under every move, the cross-model bridge against `cube` |
+| `solver/cube3/coords.rs` | 13 | Encode and decode round trips over every value, every move table against direct cubie application, solved at 0 |
 | `ui/mod.rs` | 12 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing, the best row's scope |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
 | `app/inspection.rs` | 12 | The countdown, the `+2` and DNF thresholds, the judge-call stages, an aborted arm |
+| `solver/cube3/search.rs` | 10 | The canonical rule, inversion, the round trip through both models, the superflip, the 21 cap, tail variety, timings |
+| `solver/cube3/mod.rs` | 9 | Uniform sampling and the parity repair, the invariants, emission order and power inversion |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
 | `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the session-best banner |
-| `scramble/mod.rs` | 8 | Every puzzle dispatches, is non-empty and is seed-stable; the three random-state events' shapes at the dispatch |
+| `solver/cube3/prune.rs` | 8 | Admissibility on samples, zero at index 0 alone, the phase caps, every cell reachable |
+| `scramble/mod.rs` | 8 | Every puzzle dispatches, is non-empty and is seed-stable; the four random-state shapes at the dispatch |
 | `scramble/cube.rs` | 7 | Move pools, lengths, the legality rule, determinism |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
 | `solver/mod.rs` | 4 | The `Engine` against a toy puzzle: the distance table by hand, the search against brute force, its randomization, rejection sampling |
 
 The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
 each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a generator for
-it fails immediately rather than shipping an empty scramble. Three of those loops now cross
-into `solver` for three of the twelve, which makes them the end-to-end coverage of the whole
+it fails immediately rather than shipping an empty scramble. Four of those loops now cross
+into `solver` for five of the twelve, which makes them the end-to-end coverage of the whole
 scramble path and is exactly what they are for. `ui/mod.rs` does the same
 thing, rendering every puzzle at every size, and so does
 `cstimer::every_event_exports_a_scramble_type_that_imports_back_to_it`, which fails the
@@ -206,16 +211,18 @@ sample would miss. The supporting shape around it:
 ### The solvers
 
 `solver/` is the one part of the tree where correctness can be *proved* rather than argued, and
-the tests are built around that. Five techniques, in descending order of how much they buy:
+the tests are built around that. Six techniques, in descending order of how much they buy:
 
-**The depth distribution is the spine.** Each puzzle module asserts the full count of states at
-every depth from 0 to 11, that nothing sits deeper, that the unreachable count is exactly what
-the encoding predicts, and that the whole thing sums to the puzzle's published state count.
-These are Jaap Scherphuis's God's-algorithm counts, twelve numbers per puzzle, and they are not
-a smoke test: a single wrong cycle, a wrong orientation delta or a missed parity constraint
-changes which states are reachable in how many moves, so the histogram moves and the test names
-the depth it moved at. Everything else in the file is a supporting check on something the
-distribution cannot see.
+**The depth distribution is the spine, for the three tabled puzzles.** Each of those modules
+asserts the full count of states at every depth from 0 to 11, that nothing sits deeper, that the
+unreachable count is exactly what the encoding predicts, and that the whole thing sums to the
+puzzle's published state count. These are Jaap Scherphuis's God's-algorithm counts, twelve
+numbers per puzzle, and they are not a smoke test: a single wrong cycle, a wrong orientation
+delta or a missed parity constraint changes which states are reachable in how many moves, so the
+histogram moves and the test names the depth it moved at. Everything else in those files is a
+supporting check on something the distribution cannot see. `cube3` has no such histogram
+available, its state space being 43 quintillion, which is why its anchor is the cross-model
+bridge below rather than a count.
 
 **Round trips, in both directions.** For a few hundred seeds each: sample a state, solve it,
 fold the solution back over the state and assert it reaches 0; then take the emitted scramble,
@@ -223,12 +230,36 @@ parse it, fold it over 0 and assert it reaches the state that was sampled. The s
 what actually pins the inversion and the token emission, because an off-by-one in the
 power-to-suffix arithmetic solves fine and scrambles wrongly.
 
-**The cross-model pin, for 2x2 only.** `solver/cube2.rs` maps a facelet `crate::cube::Cube` into
-its own corner coordinates and asserts the two models agree, on every one of the nine moves from
-two hundred random positions and on the state behind a hundred seeded scrambles. `cube` was
-written from facelet permutations and `cube2` from corner coordinates, independently, so
-agreement on that many moves is the strongest check this codebase can express. It is also the
-reason the 2x2's scramble preview can be trusted.
+**The cross-model pin, on the two cubes that have a second model.** `solver/cube2.rs` maps a
+facelet `crate::cube::Cube` into its own corner coordinates and asserts the two models agree, on
+every one of the nine moves from two hundred random positions and on the state behind a hundred
+seeded scrambles. `solver/cube3/cubies.rs` does the same over all twenty pieces and all eighteen
+moves, reading each corner's three stickers and each edge's two to recover which piece is where
+and how it is turned. `cube` was written from facelet permutations and the solvers from
+coordinates, independently, so agreement on that many moves is the strongest check this codebase
+can express. It is also the reason those events' scramble previews can be trusted.
+
+The bridge is `pub(super)` and `#[cfg(test)]` rather than private to the tests module, because
+`search.rs` uses it too: every solve in the 3x3 sweep is checked twice over, the solution folded
+back on the cubie model and asserted to reach solved, then the emitted scramble folded onto a
+solved facelet `Cube` and asserted to reach the state that was sampled. That second half is what
+catches a merge at the phase junction, which is invisible in the move indices and visible in the
+tokens.
+
+**Where a published fact exists, it is the fixture.** The 3x3's are two. The superflip, every
+edge flipped and nothing else moved, needs exactly 20 moves optimally, so the solver is asserted
+to return 20 or 21 for it and to solve it; a two-phase decomposition is not obliged to find the
+optimum, which is why the band and not the number. And the pruning tables are asserted
+**admissible** rather than merely populated: one move never drops a table's value by more than
+one, and zero sits at index 0 alone. Admissibility is the property the whole search rests on, an
+over-estimating bound prunes away the answer, and it is testable in exactly that one line.
+
+The cap is pinned as a band too, and deliberately not as `<= 21`. The search aims at 21 and
+raises its cap to the sum of the two phase maxima when neither aim can fit, which measurably
+happens about nine times in twenty thousand, so a test asserting 21 as an invariant would be
+asserting something the code does not promise and would be one seed choice away from failing.
+What the tests assert instead is the ceiling the code can promise, the share inside 21, and the
+mean over a sweep. See [algorithms.md](algorithms.md#what-comes-out-and-the-two-honest-caveats).
 
 **Mutation testing, by hand, on the search randomization.** `Engine::solve_exactly` shuffles its
 candidate moves at every node, and the reason is a defect a passing suite did not catch: with a
@@ -249,13 +280,32 @@ puzzle over Z/8, small enough that the distance table is written out by hand as
 force for every start and every length up to seven. The real puzzles then only have to be right
 about their own move models.
 
-**What the tables cost the suite.** The `OnceLock`s make each puzzle's tables and distance table
-a once-per-binary cost, however many tests touch them, but in debug that cost is real: about
-3.3 s for 2x2, 0.6 s for Pyraminx and 4.5 s for Skewb. Because the tests run in parallel threads
-those overlap, and the full debug suite lands at roughly 7 s of test time and under 9 s of wall
-time, so nothing needed weakening and no `[profile.test]` override was added. If a fourth solver
-ever pushes the suite past twenty seconds, the fix is `opt-level = 1` on the test profile with a
-comment saying why, never a shorter fixture.
+**What the tables cost the suite, and the one profile override in the tree.** The `OnceLock`s
+make each puzzle's tables a once-per-binary cost however many tests touch them, but the cost is
+real, and `cube3` raised it twice over. Its own tests came first: four million pruning cells
+swept breadth-first, six move tables built over every value of every coordinate, and a few
+hundred two-phase solves, which took the debug suite from the roughly 7 s plan 01 left it at to
+**42.7 s** while nothing was yet dispatched to it. Then wiring it in added the second half,
+because the 3x3 is the default session and so every `test_app` and every `Puzzle::ALL` sweep in
+the tree now pays a two-phase solve of its own: **59.4 s**.
+
+The sanctioned lever, held in reserve since plan 01 for exactly this, is now pulled:
+
+```toml
+# The solvers build million-cell tables and search millions of nodes per scramble, which
+# unoptimized costs the suite minutes rather than seconds; opt-level 1 keeps debug info.
+[profile.test]
+opt-level = 1
+```
+
+That takes the same 544 tests from 59.4 s to **7.0 s**, a factor of eight and a half, which puts
+the suite back where it sat before any of this and is the whole of the fix: no fixture was
+shortened, no seed count reduced and no assertion weakened.
+It is the right lever because the cost is arithmetic rather than logic, so the optimizer removes
+it without changing what is being tested, and `opt-level = 1` keeps debug info and overflow
+checks, which is what distinguishes it from testing in release. A one-off release run is still
+how the solvers' timings are measured, since a number quoted at `opt-level = 1` would describe
+neither the suite nor the shipped binary.
 
 ### Replay verification
 

@@ -26,7 +26,7 @@ terminals, `ui` is read-only with respect to state, and only `storage` touches t
 | `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `cube`, `scramble`, `stats`, `storage`, `types` |
 | `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `cube`, `types` |
 | `src/scramble/` | Scramble generation per puzzle, and the dispatch every event enters through | `solver`, `types`, `rand` |
-| `src/solver/` | Random-state scrambles for 2x2, Pyraminx and Skewb: coordinates, distance tables, exact-length search | `types`, `rand` |
+| `src/solver/` | Random-state scrambles for 3x3, one-handed, 2x2, Pyraminx and Skewb: coordinates, distance and pruning tables, exact-length and two-phase search | `types`, `rand` |
 | `src/cube/` | Facelet state for the NxN cubes: `Cube`, `Face`, WCA move parsing and application | `types` |
 | `src/stats.rs` | Averages, session summaries, session bests | `types` |
 | `src/cstimer.rs` | Conversion between `SaveFile` and csTimer's export format, both directions | `types`, `serde_json` |
@@ -45,8 +45,8 @@ notation in common:
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `generate` and `generate_with_rng`, dispatching on `Puzzle`; one-handed maps to the 3x3 generator here, and the three random-state events map to `solver` | 47 |
-| `cube.rs` | 3x3 through 7x7: the move-type model, the pools, the same-axis-run rule | 147 |
+| `mod.rs` | `generate` and `generate_with_rng`, dispatching on `Puzzle`; the five random-state events, one-handed among them, map to `solver` | 48 |
+| `cube.rs` | 4x4 through 7x7: the move-type model, the pools, the same-axis-run rule | 144 |
 | `megaminx.rs` | Seven Pochmann lines | 42 |
 | `square1.rs` | Twists and slashes over a 24-slot shape simulator | 115 |
 | `clock.rs` | Fifteen dial tokens around a `y2` | 52 |
@@ -55,25 +55,51 @@ notation in common:
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `scramble` (the `Puzzle` dispatch), the `Engine` struct, `distances`, `random_reachable`, `solve_exactly` and the `dfs` behind it | 160 |
+| `mod.rs` | `scramble` (the `Puzzle` dispatch), the `Engine` struct, `distances`, `random_reachable`, `solve_exactly` and the `dfs` behind it | 169 |
 | `cube2.rs` | Seven-corner permutation and orientation coordinates, two move tables, TNoodle-shape 11-move emission | 259 |
 | `pyraminx.rs` | Edge permutation, edge flip and axial twist coordinates, three move tables, the tips | 329 |
 | `skewb.rs` | Centre, ring, and two twist coordinates, four move tables, the geometry they are derived from | 431 |
 
+`solver/cube3/` is the 3x3, and it is the one puzzle here that is not tabled whole. It borrows
+`Engine::distances` for its pruning sweeps and nothing else, and neither `Engine` nor the other
+three puzzles know it exists:
+
+| File | Covers | Non-test lines |
+| --- | --- | --- |
+| `cubies.rs` | The cubie model: `Cubies`, the eighteen moves, composition, parity, the facelet bridge | 194 |
+| `coords.rs` | The six coordinates and their move tables, `PHASE2_MOVES`, the two `MoveTables` locks' contents | 347 |
+| `prune.rs` | The four pruning tables over product coordinates, `bound1` and `bound2` | 168 |
+| `search.rs` | The two IDA* phases, the improve-until-21 loop, the inverse second aim | 362 |
+| `mod.rs` | Uniform sampling, the solved-state resample, `scramble(rng)`, writing a solution backwards | 122 |
+
 The dependency runs one way only: `scramble::generate` and `generate_with_rng` are still the
 only public path to a scramble, they are still infallible, and `solver::scramble` is
 `Option`-typed purely so the dispatch can say which events it answers for. `app` and `ui` are
-unchanged by this phase and neither names `solver`.
+unchanged by this phase and neither names `solver`; the 3x3 arriving as a variable-length
+scramble from a solver rather than a fixed 20 random moves needed no edit above
+`scramble::generate`.
 
-Table lifecycle is the one thing worth knowing from outside the module. Each puzzle keeps two
-`OnceLock`s, one for its move tables and one for its distance table, and **they have to be
-separate locks** because the breadth-first search calls `apply`, which reads the move tables, so
-a single lock holding both would deadlock initializing itself. Both are built on the first
-scramble of that event, never at startup and never inside the draw loop; measured in release
-that first scramble costs about 0.08 s for Pyraminx, 0.42 s for 2x2 and 1.30 s for Skewb, and
-every scramble after it is tens of microseconds. Nothing is cached to disk, so a run pays for
-the events it uses and no others. Because the locks are process-wide, a `cargo test` binary pays
-each build once however many tests touch it.
+Table lifecycle is the one thing worth knowing from outside the module, and the rule is the
+same in both halves: **the lock whose initializer reads another table sits above it and never
+below it**, because one lock holding both would deadlock initializing itself. Each tabled
+puzzle keeps two, one for its move tables and one for its distance table, since the
+breadth-first search calls `apply`. `cube3` keeps two for the same reason at one remove: one
+covers all six move tables, because a row of those is built by turning cubies directly and
+reaches back for nothing, and the pruning tables keep their own above it, because their sweep
+reads the move tables.
+
+Everything is built on the first scramble of that event, never at startup and never inside the
+draw loop. Measured in release, that first scramble costs about 0.08 s for Pyraminx, 0.40 s for
+the 3x3, 0.42 s for 2x2 and 1.30 s for Skewb; the 3x3's tables are about 5.5 MB, 3.8 of it the
+four pruning tables and 1.7 the six move tables. Every scramble after the first is tens of
+microseconds for the tabled puzzles and about 12 ms for the 3x3, which is a search rather than
+a lookup. Nothing is cached to disk, so a run pays for the events it uses and no others.
+Because the locks are process-wide, a `cargo test` binary pays each build once however many
+tests touch it.
+
+The 3x3 is the exception to "only for the events you use", and it is worth naming because it
+is the only user-visible cost of this phase: the 3x3 is the default session, so a normal run
+pays its 0.40 s while the first frame is being prepared rather than on a later keystroke.
 
 `src/cube/` is the third side of this: `scramble/` and `solver/` produce strings and `cube/`
 consumes them. It is 6·n·n stickers, each naming the face it belongs to when solved, and a move
@@ -82,12 +108,15 @@ is a permutation of them. `Cube::for_scramble` is how a scramble becomes a cube 
 scramble the parser refuses, so a generator bug degrades to a missing preview rather than a
 panic. `Cube::size` is the one other thing asked from outside, because `/preview` has to know
 whether an event has a model before it opens anything. The conventions, meaning face order,
-orientation and index arithmetic, are contract and spelled out in the module doc. The 2x2 is
-where the two models meet: its random-state scrambles are still plain `U R F` cube notation, so
-the preview keeps working, and `solver/cube2.rs` carries a cross-model test that maps a facelet
-`Cube` into its corner coordinates and asserts the two agree on every move and on many seeded
-scrambles. The two were written from opposite directions, so that agreement is the strongest
-check in the tree. `Cube::is_solved` and `invert_scramble` are still used only by the tests and
+orientation and index arithmetic, are contract and spelled out in the module doc. The cubes the
+solvers cover are where the two models meet: their random-state scrambles are still plain cube
+notation, so the preview keeps working, and each solver carries a cross-model test that maps a
+facelet `Cube` into its own coordinates and asserts the two agree on every move and on many
+seeded scrambles. `solver/cube2.rs` does it over seven corners; `solver/cube3/cubies.rs` does it
+over all twenty pieces, and every solve in the 3x3 suite goes through it twice, once to check
+the solution on the cubie model and once to check the emitted scramble on the facelet one. The
+two models were written from opposite directions, so that agreement is the strongest check in
+the tree. `Cube::is_solved` and `invert_scramble` are still used only by the tests and
 carry a single-item `#[allow(dead_code)]` each; the solvers invert their solutions over
 `(axis, power)` pairs inside their own coordinates, never over notation, so `invert_scramble` did
 not gain the caller the previous phase expected.
@@ -146,14 +175,16 @@ sideways except `ui` reading `app` and `scramble` reaching down into `solver`.
 
 A scramble takes one path through all of that, and it is worth following once. `App::new_scramble`
 calls `scramble::generate(self.puzzle())`, which draws from the thread-local rng and hands off to
-`generate_with_rng`. That matches on `Puzzle` and splits three ways: the nine random-move events
-go to a file in `scramble/`, one-handed goes to the 3x3 generator under a different `Puzzle`, and
-2x2, Pyraminx and Skewb go through `random_state` into `solver::scramble`, which builds its tables
-if this is the event's first scramble, draws a uniformly random reachable state, solves it in
-exactly eleven moves and returns the inverse. Whichever branch ran, `new_scramble` gets a
-`String`, stores it, resets the times cursor and calls `refresh_preview`, which asks
-`cube::Cube::for_scramble` for the facelet cube behind it. Nothing above `scramble::generate`
-can tell the branches apart.
+`generate_with_rng`. That matches on `Puzzle` and splits two ways: the seven random-move events,
+4x4 through 7x7, Megaminx, Square-1 and Clock, go to a file in `scramble/`; the five
+random-state events go through `random_state` into `solver::scramble`, which builds that event's
+tables if this is its first scramble. From there 2x2, Pyraminx and Skewb draw a uniformly random
+reachable state and solve it in exactly eleven moves, while 3x3 and one-handed, sharing one arm,
+go to `cube3`, which draws a uniformly random legal state and solves it in two phases to at most
+21 moves. Either way the answer is the inverse of the solution. Whichever branch ran,
+`new_scramble` gets a `String`, stores it, resets the times cursor and calls `refresh_preview`,
+which asks `cube::Cube::for_scramble` for the facelet cube behind it. Nothing above
+`scramble::generate` can tell the branches apart, including how long the string will be.
 
 Three rules keep the seams clean:
 

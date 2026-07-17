@@ -1,8 +1,9 @@
-//! Random-move scrambles for the NxN cubes, 3x3 through 7x7, one-handed included.
+//! Random-move scrambles for the big NxN cubes, 4x4 through 7x7.
 //!
-//! The 2x2 is not here: its state space is small enough to solve exhaustively, so it is
-//! scrambled from a random state by `crate::solver`. One-handed arrives as a 3x3, mapped in
-//! the dispatch, so nothing below ever sees `Puzzle::Oh` either.
+//! The 2x2 and the 3x3 are not here, and one-handed with the 3x3: `crate::solver` reaches
+//! every state of all three, so they are scrambled from a random state instead. What is left
+//! is the sizes no solver covers, where WCA notation grows a layer width and a random walk of
+//! the length TNoodle uses is the whole method.
 
 use crate::types::Puzzle;
 use rand::Rng;
@@ -59,9 +60,7 @@ const R3W: MoveType = MoveType::new("3Rw", b'R', 3);
 const F3W: MoveType = MoveType::new("3Fw", b'F', 3);
 const B3W: MoveType = MoveType::new("3Bw", b'B', 3);
 
-/// 3x3: the six outer faces.
-const POOL_3: &[MoveType] = &[U, D, L, R, F, B];
-/// 4x4: six outer faces + Uw Rw Fw, because a 2-of-4 turn is half the cube.
+/// 4x4: the six outer faces + Uw Rw Fw, because a 2-of-4 turn is half the cube.
 const POOL_4: &[MoveType] = &[U, D, L, R, F, B, UW, RW, FW];
 /// 5x5: six outer faces + all six wide moves, since 2 of 5 is never half.
 const POOL_5: &[MoveType] = &[U, D, L, R, F, B, UW, DW, LW, RW, FW, BW];
@@ -74,27 +73,25 @@ const POOL_7: &[MoveType] = &[
 
 const SUFFIXES: [&str; 3] = ["", "'", "2"];
 
-/// The move pool for a cube. Only 3x3 through 7x7 ever reach this module.
+/// The move pool for a cube. Only 4x4 through 7x7 ever reach this module.
 fn pool(puzzle: Puzzle) -> &'static [MoveType] {
     match puzzle {
-        Puzzle::Cube3 => POOL_3,
         Puzzle::Cube4 => POOL_4,
         Puzzle::Cube5 => POOL_5,
         Puzzle::Cube6 => POOL_6,
         Puzzle::Cube7 => POOL_7,
-        other => unreachable!("{} is not a 3x3 through 7x7 cube", other.name()),
+        other => unreachable!("{} is not a 4x4 through 7x7 cube", other.name()),
     }
 }
 
 /// Number of moves to generate, matching what TNoodle emits for each event.
 fn move_count(puzzle: Puzzle) -> usize {
     match puzzle {
-        Puzzle::Cube3 => 20,
         Puzzle::Cube4 => 44,
         Puzzle::Cube5 => 60,
         Puzzle::Cube6 => 80,
         Puzzle::Cube7 => 100,
-        other => unreachable!("{} is not a 3x3 through 7x7 cube", other.name()),
+        other => unreachable!("{} is not a 4x4 through 7x7 cube", other.name()),
     }
 }
 
@@ -153,8 +150,7 @@ mod tests {
     use rand::SeedableRng;
 
     /// The puzzles this module answers for.
-    const CUBES: [Puzzle; 5] =
-        [Puzzle::Cube3, Puzzle::Cube4, Puzzle::Cube5, Puzzle::Cube6, Puzzle::Cube7];
+    const CUBES: [Puzzle; 4] = [Puzzle::Cube4, Puzzle::Cube5, Puzzle::Cube6, Puzzle::Cube7];
 
     /// Parse a scramble token like "3Rw'" into (move type name, suffix).
     fn split_token(token: &str) -> (&str, &str) {
@@ -226,12 +222,11 @@ mod tests {
 
     fn expected_len(puzzle: Puzzle) -> usize {
         match puzzle {
-            Puzzle::Cube3 => 20,
             Puzzle::Cube4 => 44,
             Puzzle::Cube5 => 60,
             Puzzle::Cube6 => 80,
             Puzzle::Cube7 => 100,
-            other => unreachable!("{} is not a 3x3 through 7x7 cube", other.name()),
+            other => unreachable!("{} is not a 4x4 through 7x7 cube", other.name()),
         }
     }
 
@@ -257,7 +252,6 @@ mod tests {
     #[test]
     fn pools_match_the_spec() {
         let names = |p: Puzzle| -> Vec<&'static str> { pool(p).iter().map(|m| m.name).collect() };
-        assert_eq!(names(Puzzle::Cube3), ["U", "D", "L", "R", "F", "B"]);
         assert_eq!(
             names(Puzzle::Cube4),
             ["U", "D", "L", "R", "F", "B", "Uw", "Rw", "Fw"]
@@ -289,7 +283,7 @@ mod tests {
         let mut double = false;
         for seed in 0..50u64 {
             let mut rng = StdRng::seed_from_u64(seed);
-            for token in scramble(Puzzle::Cube3, &mut rng)
+            for token in scramble(Puzzle::Cube4, &mut rng)
                 .split(' ')
                 .map(|t| split_token(t).1)
             {

@@ -1075,6 +1075,37 @@ mod tests {
     }
 
     #[test]
+    fn a_random_state_3x3_scramble_still_previews_and_so_does_one_handed() {
+        // The default session's own event goes through the two-phase solver now, so the app
+        // pays a table build on its first scramble and gets a variable-length scramble back.
+        // Nothing in `app` or `ui` knows either of those things, and this is the pin that says
+        // so: the same chain the 2x2 proves, on the event every run opens on.
+        let (mut app, _g) = test_app("preview-random-state-3x3");
+        assert!(
+            app.preview.as_ref().is_some_and(|cube| !cube.is_solved()),
+            "a brand new app opens on the 3x3 and must preview it scrambled: {}",
+            app.scramble
+        );
+        for event in ["3x3", "oh"] {
+            run_command(&mut app, event);
+            for _ in 0..3 {
+                app.new_scramble();
+                let cube = app
+                    .preview
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("/{event} must leave a cube to preview"));
+                assert_eq!(cube.n(), 3, "/{event} previews at the wrong size");
+                assert!(
+                    !cube.is_solved(),
+                    "a random-state /{event} cannot be solved: {}",
+                    app.scramble
+                );
+                assert_preview_is_fresh(&app, &format!("after a fresh /{event} scramble"));
+            }
+        }
+    }
+
+    #[test]
     fn the_preview_cache_follows_every_session_and_puzzle_change() {
         let (mut app, _g) = test_app("cache-preview-session");
         // Navigating, forking, switching back, an event with no model, and a session deleted

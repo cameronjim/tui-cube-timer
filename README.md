@@ -5,8 +5,9 @@ scramble, times the solve, keeps your averages, and remembers everything the
 next time you open it. If you have used csTimer, the rhythm will feel familiar:
 hold the space bar, wait for green, let go, solve, hit any key to stop.
 
-Scrambles cover twelve WCA events, and 2x2, Pyraminx and Skewb are random-state,
-drawn uniformly from every legal position the way official scrambles are.
+Scrambles cover twelve WCA events, and 3x3, one-handed, 2x2, Pyraminx and Skewb
+are random-state, drawn uniformly from every legal position the way official
+scrambles are.
 
 Everything else (sessions, penalties, switching puzzles) happens from a small
 command line at the bottom of the screen, so your hands never have to leave the

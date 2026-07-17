@@ -2,7 +2,8 @@
 
 Cubetimer is a speedcube timer that runs in the terminal: scrambles in WCA notation for
 twelve events (2x2 through 7x7, Pyraminx, Skewb, Megaminx, Square-1, Clock, 3x3 one-handed),
-random-state for the three of those small enough to solve exhaustively,
+random-state for five of them: the three small enough to solve exhaustively, plus the 3x3 and
+one-handed by Kociemba's two-phase algorithm,
 optional 15 second inspection with the 8 and 12 second judge calls, mo3 through ao1000,
 session bests and sessions persisted as JSON, and csTimer import and export. It is
 written in Rust on top of ratatui and crossterm, and it is Windows-first, because the
@@ -35,16 +36,17 @@ single jobs:
 | `main.rs` | Process lifecycle and the event loop: load, init terminal, poll, draw, restore, final save |
 | `app/` | State machine: timer states, key handling, `/commands`, and the derived fields the UI reads |
 | `ui/` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
-| `scramble/` | Scramble generation in WCA notation: the dispatch, plus the nine random-move generators |
-| `solver/` | Random-state scrambles for the three events small enough to solve exhaustively |
+| `scramble/` | Scramble generation in WCA notation: the dispatch, plus the seven random-move generators |
+| `solver/` | Random-state scrambles: the three events small enough to solve exhaustively, and the 3x3 two-phase |
 | `cube/` | Facelet cube state for the NxN events: what a scramble leaves on each sticker |
 | `stats.rs` | Pure statistics: trimmed averages, session summaries, session bests |
 | `cstimer.rs` | Pure conversion to and from csTimer's export format; no file IO, the commands do that |
 | `storage.rs` | Where the save file lives, and reading and writing it atomically |
 | `types.rs` | Shared vocabulary and the serde shape of the persisted file |
 
-Four of those are directories split along an internal seam, and a fifth, `cube/`, is one
-file:
+Four of those are directories split along an internal seam, a fifth, `cube/`, is one
+file, and one of the four nests a directory of its own, `solver/cube3/`, because the 3x3 is a
+method rather than a table:
 
 | File | Responsibility |
 |---|---|
@@ -66,6 +68,11 @@ file:
 | `solver/cube2.rs` | 2x2 corner coordinates, move tables, exact-11 scrambles |
 | `solver/pyraminx.rs` | Pyraminx edge and axial coordinates, tips, exact-11 scrambles |
 | `solver/skewb.rs` | Skewb centre and corner coordinates, move tables, exact-11 scrambles |
+| `solver/cube3/cubies.rs` | The 3x3 itself: `cp`, `co`, `ep`, `eo`, the eighteen moves, the invariants |
+| `solver/cube3/coords.rs` | The six two-phase coordinates: encode, decode, one move table each |
+| `solver/cube3/prune.rs` | The four pruning tables: exact distances in product-coordinate projections |
+| `solver/cube3/search.rs` | The two IDA* phases, the improve-until-21 loop, the inverse second aim |
+| `solver/cube3/mod.rs` | Uniform sampling, the solved-state resample, and the solution written backwards |
 
 No module reaches around another's API. `ui` reads `App` fields and never touches
 `Instant`, the filesystem, or `stats` (statistics are cached on `App` by `refresh_derived`
@@ -74,7 +81,10 @@ cube is cached the same way and for the same reason, by `refresh_preview` at eve
 assigns the scramble: `cube/` is pure state that a scramble string feeds and `ui/net.rs`
 draws, and it never appears in `draw`. `solver/` sits behind `scramble/` the same way:
 `scramble::generate` and `generate_with_rng` are still the only public path to a scramble and
-still infallible, and nothing in `app` or `ui` knows a solver exists. `app` is
+still infallible, and nothing in `app` or `ui` knows a solver exists, nor that the 3x3's
+scramble is a variable length where every other event's is fixed. `solver/cube3/` sits behind
+`solver/mod.rs` on the same terms, borrowing `Engine::distances` for its pruning sweeps and
+exposing one `scramble(rng)`; the other three puzzle modules do not know it is there. `app` is
 the only caller of `storage::save` and of `cstimer`, which opens no file of its own.
 Nothing outside `storage.rs` decides where data lives. `App`'s public surface is the whole
 of `app`: `crate::app::App` keeps every path it had before the directory split, and
@@ -82,21 +92,36 @@ of `app`: `crate::app::App` keeps every path it had before the directory split, 
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
 rather than appending. Nothing in `src/` is over the line, and counting stops at the file's
-`#[cfg(test)]`. `ui/overlay.rs` is still the file closest to it at 456, then `app/mod.rs` at
-454 and `app/commands.rs` at 446, with the largest of the new solvers, `solver/skewb.rs`, at
-431 next, then `ui/mod.rs` at 384, `cstimer.rs` at 372, `storage.rs` at 345, `solver/pyraminx.rs`
-at 329 and `cube/mod.rs` at 319 behind them. The rest of `solver/` has plenty of room,
-`solver/cube2.rs` at 259 and `solver/mod.rs` at 160, and `scramble/cube.rs` dropped to 147 when
-the 2x2 left it. **The seam waiting now is in `ui/overlay.rs`**: the trend cluster,
+trailing `#[cfg(test)] mod tests`. `ui/overlay.rs` is still the file closest to it at 464, then
+`app/mod.rs` at 454 and `app/commands.rs` at 446, with the largest of the tabled solvers,
+`solver/skewb.rs`, at 431 next, then `ui/mod.rs` at 384, `cstimer.rs` at 372, the largest of the
+two-phase files, `solver/cube3/search.rs`, at 362, then `solver/cube3/coords.rs` at 347,
+`storage.rs` at 345, `solver/pyraminx.rs` at 329 and `cube/mod.rs` at 319 behind them. The rest
+of `solver/` has plenty of room, `solver/cube2.rs` at 259, `solver/cube3/cubies.rs` at 194,
+`solver/mod.rs` at 169, `solver/cube3/prune.rs` at 168 and `solver/cube3/mod.rs` at 122, and
+`scramble/cube.rs` dropped to 144 when the 3x3 followed the 2x2 out of it.
+
+`solver/cube3/cubies.rs` is the one file the counting rule has to be read carefully on, and 194
+is the honest number: it carries `#[cfg(test)]` items in the middle of the file, not only at the
+bottom, because the facelet bridge that pins it against `cube/` is used by `search.rs` as well as
+by its own tests and so cannot live inside a `mod tests`. Counting to the trailing
+`#[cfg(test)]` gives 297; the three test-gated regions above it, the `crate::cube` import, the
+two orientation-sum helpers and the bridge itself, are 103 lines of that.
+
+**The seam waiting now is in `ui/overlay.rs`**: the trend cluster,
 meaning `TREND_PERCENTILE`, `TREND_TRIM_MIN`, `TREND_FLAT_PAD` and the `TrendPlot` arithmetic
 of `trend_top`, `trend_plot` and `trend_ticks` behind `draw_trend`, which is the one popup
 that computes a picture instead of laying text out. `solver/skewb.rs` has a second one behind
 that, and it is worth naming now that the file is the fourth largest: the geometry derivation,
 meaning `Rot`, `rot`, `turned`, `leans`, `face_of`, `corner_of` and `corners_turned` behind the
 single `turn`, which is the part that turns two arrays of corner signs into every table and is
-the only part of the file that reasons about the solid rather than about indices. Nothing else
-has an obvious seam left, so treat growth past roughly 500 in any of them as the prompt to look
-for one.
+the only part of the file that reasons about the solid rather than about indices. `solver/cube3/`
+adds no third: it arrived pre-split along the layers of the method, and the obvious cut inside
+its largest file, separating the second aim from the searches, would put `inverted` and
+`turned_around` in a file of their own to no purpose, while the obvious cut inside `coords.rs`
+would divide each coordinate from its own move table, which runs across the responsibility lines
+rather than along them. Nothing else has an obvious seam left, so treat growth past roughly 500
+in any of them as the prompt to look for one.
 `app/inspection.rs` is the most recent cut and it shows the shape to aim for, as
 `app/progress.rs`, `app/selection.rs` and `ui/timer.rs` did before it: the parent keeps one
 entry point per cluster (`start_inspection`, `refresh_inspection`, `on_key_inspecting`,

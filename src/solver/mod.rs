@@ -1,11 +1,18 @@
-//! Random-state scrambles for the events small enough to solve exhaustively.
+//! Random-state scrambles for the events a solver can reach every state of.
 //!
-//! Each puzzle module encodes states as indices with 0 solved, and the shared [`Engine`]
-//! does the rest: a breadth-first distance table over every state, uniform sampling of
-//! reachable states, and the exact-length canonical search TNoodle uses, whose inverse
-//! is the scramble. Method and fixtures in `claude-docs/plans/01-random-state-scrambles.md`.
+//! Three of them are small enough to table whole. Each of those modules encodes states as
+//! indices with 0 solved, and the shared [`Engine`] does the rest: a breadth-first distance
+//! table over every state, uniform sampling of reachable states, and the exact-length
+//! canonical search TNoodle uses, whose inverse is the scramble. Method and fixtures in
+//! `claude-docs/plans/01-random-state-scrambles.md`.
+//!
+//! The 3x3 is not one of them, at 43 quintillion states, so `cube3` reaches its states by
+//! Kociemba's two-phase algorithm instead: distances in projections of the cube rather than
+//! in the cube itself. It borrows [`Engine::distances`] for those projections and nothing
+//! else. Method in `claude-docs/plans/02-kociemba-two-phase.md`.
 
 mod cube2;
+mod cube3;
 mod pyraminx;
 mod skewb;
 
@@ -16,6 +23,8 @@ use rand::Rng;
 pub fn scramble<R: Rng>(puzzle: Puzzle, rng: &mut R) -> Option<String> {
     match puzzle {
         Puzzle::Cube2 => Some(cube2::scramble(rng)),
+        // One-handed is a 3x3 with a hand behind your back, so it takes the same solver.
+        Puzzle::Cube3 | Puzzle::Oh => Some(cube3::scramble(rng)),
         Puzzle::Pyraminx => Some(pyraminx::scramble(rng)),
         Puzzle::Skewb => Some(skewb::scramble(rng)),
         _ => None,

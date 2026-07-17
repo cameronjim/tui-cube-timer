@@ -17,8 +17,9 @@ main.rs  ->  ui/        ->  app/ (read-only), cube/, types.rs
 
 `app/`, `scramble/`, `solver/`, `ui/` and `cube/` are directories, not files, because one
 responsibility outgrew one file or is expected to. `scramble/mod.rs` dispatches on `Puzzle`
-to one generator per puzzle family, and to `solver/` for the three random-state events;
-`solver/mod.rs` holds the shared engine and one file per puzzle sits behind it;
+to one generator per puzzle family, and to `solver/` for the five random-state events;
+`solver/mod.rs` holds the shared engine with one file per tabled puzzle behind it and
+`solver/cube3/` behind it as well, the 3x3 being a method rather than a table;
 `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
 block font, `ui/overlay.rs` draws the popups on top, `ui/net.rs` turns a `Cube` into net
 lines and `ui/layout.rs` holds the pure

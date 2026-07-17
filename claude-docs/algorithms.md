@@ -321,37 +321,41 @@ reproducible scrambles from `StdRng::seed_from_u64`. `mod.rs` does nothing but m
 no notation and almost no structure. Every generator is a `fn scramble<R: Rng>(rng: &mut R)
 -> String` and every one is total, meaning no retry loops and no path that can fail.
 
-Twelve events, two methods. Nine are random-move and live in `scramble/`, one file per
-family. Three, 2x2, Pyraminx and Skewb, are random-state and live in `src/solver/`, which the
-dispatch reaches through one arm:
+Twelve events, two methods. Seven are random-move and live in `scramble/`, one file per
+family. Five, the 3x3 and one-handed with it, the 2x2, Pyraminx and Skewb, are random-state
+and live in `src/solver/`, which the dispatch reaches through one arm:
 
 ```rust
-Puzzle::Cube2 | Puzzle::Pyraminx | Puzzle::Skewb => random_state(puzzle, rng),
+Puzzle::Cube2 | Puzzle::Cube3 | Puzzle::Oh | Puzzle::Pyraminx | Puzzle::Skewb => {
+    random_state(puzzle, rng)
+}
 ```
 
-`solver::scramble` answers `Some` for exactly those three and `None` for everything else, and
+`solver::scramble` answers `Some` for exactly those five and `None` for everything else, and
 that arm is what makes the `None` case unreachable, so `random_state` unwraps into an
 `unreachable!` and nothing outside `scramble/` ever handles an `Option`. `generate` and
 `generate_with_rng` stay the only way in, and both stay infallible.
 
-`Puzzle::Oh` is 3x3 with one hand behind your back, so the dispatch maps it onto the 3x3
-generator verbatim:
+`Puzzle::Oh` is 3x3 with one hand behind your back, and it goes through that same arm with
+its own `Puzzle` intact rather than being rewritten as `Puzzle::Cube3` first; `solver`'s own
+dispatch pairs the two:
 
 ```rust
-Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
+Puzzle::Cube3 | Puzzle::Oh => Some(cube3::scramble(rng)),
 ```
 
-That is the whole of one-handed as far as scrambling is concerned, and mapping it here
-rather than inside `cube.rs` is also what keeps `cube::scramble` a function of cube
-variants only. The event is separate everywhere it matters, meaning its own default session
-and its own times, and identical everywhere it does not. A seeded test asserts the two
-generators agree scramble for scramble on the same seed, so the identity cannot quietly
-drift.
+That is the whole of one-handed as far as scrambling is concerned. The event is separate
+everywhere it matters, meaning its own default session and its own times, and identical
+everywhere it does not. A seeded test asserts the two events agree scramble for scramble on
+the same seed, so the identity cannot quietly drift; because both arms now reach the same
+function through the same number of rng draws, that test is also what says the pairing was
+moved without disturbing either event's stream.
 
 Two things are true across all of them. The output is a single string, space separated,
 with no leading or trailing whitespace; Megaminx is the only one that contains a newline.
-And every scramble is a fixed length for its event, so nothing about the move count is
-randomised.
+And the length is fixed per event for ten of the twelve: the 3x3 and one-handed are the
+exception, because a two-phase solution is as long as the position needs, which the section
+on them explains.
 
 ### How close each event is to official
 
@@ -365,11 +369,11 @@ saying otherwise would be dishonest.
 | Event | TNoodle | Cubetimer | Verdict |
 | --- | --- | --- | --- |
 | 2x2, Pyraminx, Skewb | random-state | random-state | **Method-identical.** Uniform over every legal state, exact-length emission |
+| 3x3, one-handed | random-state, two-phase | random-state, two-phase | **Method-identical.** Uniform over every legal state; the search is weaker, so solutions run a move longer |
 | Clock | random-state | random-move | **Exact.** Clock's moves commute, so uniform amounts already give a uniform state |
 | Megaminx | random-move | random-move | **Emission-identical.** Same distribution, only the PRNG differs |
 | 5x5, 6x6, 7x7 | random-move | random-move | **Equivalent.** Same pools, lengths and legality rule |
-| 3x3, 4x4 | random-state | random-move | Approximation |
-| One-handed | random-state (as 3x3) | random-move (as 3x3) | Approximation, identical to 3x3 |
+| 4x4 | random-state | random-move | Approximation |
 | Square-1 | random-state | random-move, shape-aware | Approximation, close |
 
 The remaining approximation rows are covered in detail at the end of their own sections. The
@@ -377,17 +381,19 @@ general shape of the gap is the same in each case: the state distribution is not
 because some positions are reachable by many more legal sequences than others, so a
 random-move scramble can occasionally land somewhere far easier than typical. These are
 good practice scrambles and they are what most cubers train on. They are not
-competition-legal. Closing the gap means shipping a solver and a distance table per puzzle,
-which is what `src/solver/` now does for the three events whose state spaces are small enough
-to search exhaustively. 3x3 is not one of them, and never will be by this method: it has 4.3
-times 10^19 states, so a table with one byte per state is 43 exabytes.
+competition-legal. Closing the gap means shipping a solver per puzzle, which is what
+`src/solver/` now does for five events: a whole-space distance table for the three small
+enough to search exhaustively, and Kociemba's two-phase algorithm for the 3x3, which is not
+one of them and never will be by the first method. It has 4.3 times 10^19 states, so a table
+with one byte per state is 43 exabytes.
 
 ---
 
-## Cubes: 3x3 through 7x7
+## Cubes: 4x4 through 7x7
 
-`src/scramble/cube.rs`. The 2x2 used to be here and is now random-state, in the section above;
-one-handed arrives as a 3x3, mapped in the dispatch, so this module sees five puzzles.
+`src/scramble/cube.rs`. The 2x2 and then the 3x3 both used to be here and are now
+random-state, in the sections below; one-handed left with the 3x3, so this module sees four
+puzzles and the smallest of them is the 4x4.
 
 ### The move model
 
@@ -414,7 +420,6 @@ types.
 
 | Puzzle | Move pool | Moves |
 | --- | --- | --- |
-| 3x3 | `U D L R F B` | 20 |
 | 4x4 | `U D L R F B` + `Uw Rw Fw` | 44 |
 | 5x5 | `U D L R F B` + `Uw Dw Lw Rw Fw Bw` | 60 |
 | 6x6 | 5x5 pool + `3Uw 3Rw 3Fw` | 80 |
@@ -432,10 +437,12 @@ one per axis. Where a width is not half the cube, all six are kept:
 - 7x7: neither 2 of 7 nor 3 of 7 is half, so all six of each width appear.
 
 Every length is fixed, and each one is the count TNoodle emits for that event. Nothing about
-the move count is randomised. The principle carries down to the 2x2 too, which the random-state
-section above keeps unchanged at `U R F`: `U` turns 1 of 2 layers, which is half, so `D L B` add
-nothing, and "the pool is the three faces that do not touch DBL" is the same fact said from the
-other side.
+the move count is randomised. The principle carries down to the two cubes that left this
+module. The 2x2's `U R F` is the same rule at the smallest size: `U` turns 1 of 2 layers,
+which is half, so `D L B` add nothing, and "the pool is the three faces that do not touch
+DBL" is the same fact said from the other side. The 3x3 keeps all six faces for the opposite
+reason, 1 of 3 being nowhere near half, which is why its solver has eighteen moves to search
+where the 2x2's has nine.
 
 ### The constraint rule
 
@@ -493,10 +500,10 @@ outside the loop and reused.
 
 The candidate list can never be empty. Every pool spans at least two axes, and the rule only
 ever excludes move types that share the current run's axis, so every move type on any other
-axis always survives the filter. The smallest pool here, 3x3's six outer faces, puts two move
-types on each of three axes, so at most two are ever excluded. The code carries a
-`debug_assert!(!candidates.is_empty())` to catch a future pool that breaks this, plus a
-`break` so a release build truncates the scramble rather than panicking.
+axis always survives the filter. The smallest pool here, the 4x4's nine move types, puts
+three on the U/D and L/R axes and three on F/B, so at most three are ever excluded. The code
+carries a `debug_assert!(!candidates.is_empty())` to catch a future pool that breaks this,
+plus a `break` so a release build truncates the scramble rather than panicking.
 
 ### How close the cubes are to official
 
@@ -507,18 +514,21 @@ rule. A scramble from Cubetimer is drawn from the same distribution as a scrambl
 TNoodle for these events. This is what the audit against TNoodle's source changed, and it is
 why the constraint rule was relaxed to the same-axis-run form.
 
-**3x3 and 4x4 are approximations**, because TNoodle generates them from a random state. The
-lengths of 20 and 44 are matched to what real TNoodle scrambles for these events look like, but
-matching the length does not make the method the same. The bias is mild on 4x4. One point that
-is easy to miss: Cubetimer's 20 moves on 3x3 is a sequence length, not the optimal solution
-depth a random-state scramble is measured by. The 2x2 was the third row here until its state
-space turned out to be small enough to solve outright.
+**The 4x4 is an approximation**, because TNoodle generates it from a random state. The length
+of 44 is matched to what real TNoodle 4x4 scrambles look like, but matching the length does
+not make the method the same, and the bias, while mild, is there. It is the last cube left in
+this file: the 2x2 was the second row here until its state space turned out to be small enough
+to solve outright, and the 3x3 was the first until the two-phase solver arrived. The point
+that stood behind that first row is worth keeping, because it is what the change fixed: a
+count of 20 random moves is a sequence length, not the optimal solution depth a random-state
+scramble is measured by, and the two are not the same number.
 
 ---
 
 ## Random state: 2x2, Pyraminx and Skewb
 
-`src/solver/`. Method-identical to the official generator.
+`src/solver/`. Method-identical to the official generator. The 3x3 is random-state too and is
+the section after this one, because its state space rules out everything below.
 
 These three events are small enough to solve completely, which is what makes the official
 method available at all. The whole of it is five steps, and `solver/mod.rs` owns four of them
@@ -739,6 +749,262 @@ isolation, so it is independent of everything else and of the other three, and e
 uniformly from three positions after the core solution is emitted. A tip is therefore already
 solved one time in three and contributes no token, which gives 0 to 4 tip moves per scramble
 with the same distribution the official generator produces.
+
+---
+
+## Random state: the 3x3, by Kociemba's two-phase algorithm
+
+`src/solver/cube3/`. Method-identical to the official generator, with a weaker search behind
+it.
+
+Everything above rests on a table with one entry per state, and the 3x3 has
+43,252,003,274,489,856,000 of them. One byte each is 43 exabytes, so the method is not
+available at any budget and no amount of engineering makes it available. What is available is
+the answer the puzzle has had since Herbert Kociemba published it in 1992, and which every
+scramble program alive now ships a descendant of: **solve the cube in two stages, each of
+which is small enough to hold a table for, and let the tables describe projections of the
+cube rather than the cube.** TNoodle calls min2phase, caps the solution at 21 moves and emits
+the inverse; Cubetimer builds its own to the same shape.
+
+The five files split along the layers of that idea, and each is testable without the ones
+above it:
+
+| File | Owns |
+| --- | --- |
+| `cubies.rs` | The puzzle itself: `cp`, `co`, `ep`, `eo`, the eighteen moves, the invariants |
+| `coords.rs` | The six coordinates: encode, decode, and one move table each |
+| `prune.rs` | The four pruning tables over product coordinates |
+| `search.rs` | The two searches and the loop that trades between them |
+| `mod.rs` | Sampling, the public `scramble(rng)`, and writing a solution backwards |
+
+### G1, and why it is the right halfway house
+
+Phase 1 drives the cube into the subgroup
+
+```
+G1 = <U, D, L2, R2, F2, B2>
+```
+
+which is the set of states reachable without ever quarter-turning L, R, F or B. Three
+conditions describe it exactly: every corner oriented, every edge oriented, and the four
+middle-slice edges home in their slice, in any order. Phase 2 then finishes inside G1, using
+only the ten moves that cannot leave it.
+
+What makes G1 the right place to stop halfway is that it is defined by conditions a *small*
+coordinate can express. A quarter turn of a side face is the only move that twists a corner,
+flips an edge, or carries a slice edge out of the slice; so "oriented, oriented, and the slice
+is the slice" is precisely "no side quarter turn is outstanding", and it is checkable from
+2,187 times 2,048 times 495 values rather than from the whole cube. Phase 2's world is smaller
+still, being three permutations. Neither phase ever needs the 43 quintillion.
+
+The two costs are bounded and both bounds are known results about the cube: **phase 1 never
+needs more than 12 moves and phase 2 never more than 18.** They are the two constants
+`MAX_PHASE1` and `MAX_PHASE2`, and their sum is the only cap the solver can promise
+unconditionally.
+
+### The six coordinates
+
+A coordinate is a projection of the cubie state chosen so that **a move acts on it by
+itself**: the value a move leaves is a function of that coordinate and the move alone, never
+of the rest of the cube. That is what makes each one a table rather than a cache, exactly as
+in the section above, and it is the same discipline of indexing orientation by position rather
+than by piece.
+
+| Coordinate | Range | What it ranks | Phase |
+| --- | --- | --- | --- |
+| `twist` | 2,187 | `co[0..7]` base 3, the eighth carried by the mod-3 sum | 1 |
+| `flip` | 2,048 | `eo[0..11]` base 2, the twelfth carried by the mod-2 sum | 1 |
+| `slice` | 495 | Which four positions hold the four slice edges, C(12,4) | 1 |
+| `cperm` | 40,320 | The factorial rank of `cp` | 2 |
+| `eperm` | 40,320 | The factorial rank of `ep[0..8]` | 2 |
+| `sliceperm` | 24 | The factorial rank of `ep[8..12]` | 2 |
+
+Zero is solved in all six, which is a convention the tables and the searches both depend on,
+and it is why `slice` is ranked on mirrored positions: the plain combinatorial number system
+puts the solved set `{8, 9, 10, 11}` at 494 rather than at 0.
+
+The three phase-2 coordinates mean something **only inside G1**. Outside it a slice edge can
+sit among `ep[0..8]`, and then neither `eperm` nor `sliceperm` is ranking a permutation of its
+own positions and neither tracks the cube at all. That is not a defect: phase 2 only ever runs
+on a cube phase 1 has already put in G1, and the ten phase-2 moves keep the two halves of the
+edge array separate, precisely because the four faces they only ever half turn swap two slice
+positions with each other rather than with a U or D position.
+
+`PHASE2_MOVES`, the ten of them, lives in `coords.rs` rather than in `search.rs` where the
+plan put it. The phase-2 move tables are the first thing that has to know what their own
+columns are, and a coordinate cannot depend on the search that reads it.
+
+### Pruning tables: exact distances in a projection
+
+An IDA* search needs a lower bound on the moves remaining, and the bound must be
+**admissible**, never larger than the truth, or the search prunes away the answer it was
+looking for. The bound here is a distance in a projection of the cube: forget everything
+except two coordinates, and the distance to solved in that smaller world cannot exceed the
+distance in the real one, because a real solution projects onto a walk of its own length.
+Exact distances are the strongest bound a projection can give, and computing them is the same
+breadth-first sweep `Engine::distances` already does for the tabled puzzles, borrowed
+unchanged.
+
+| Table | Cells | Swept under |
+| --- | --- | --- |
+| `twist` x `slice` | 1,082,565 | all 18 moves |
+| `flip` x `slice` | 1,013,760 | all 18 moves |
+| `cperm` x `sliceperm` | 967,680 | the 10 phase-2 moves |
+| `eperm` x `sliceperm` | 967,680 | the 10 phase-2 moves |
+
+**Why pairs, and why not all three.** Pairing each orientation coordinate with `slice` lets
+the bound say something the coordinates cannot say apart: that the orientations and the slice
+edges have to come home in the same moves. Pairing all three would be the ideal bound and 2.2
+billion cells, so a phase's bound is the max of its two overlapping pairs, which is the
+compromise every descendant of Kociemba's solver makes. The max of two admissible bounds is
+admissible, being a bound both of them respect.
+
+Admissibility is testable rather than argued, and that is the point of stating it this way:
+one move can change any table's value by at most one, and value 0 sits at index 0 alone. Both
+are asserted over thousands of sampled product states per table.
+
+### The improve-until-21 ladder
+
+The search does not stop at the first answer it finds, and that is the whole reason the
+solutions are 21 moves rather than the 25 or so a single decomposition gives. The first
+phase-1 solution a random cube offers usually leaves a phase 2 far too long to fit, so the
+loop takes **every** phase-1 solution at the current target depth, tries to finish each one
+inside what the cap leaves, and only then raises the target by one. A longer phase 1
+routinely buys a shorter total.
+
+Three rules cut duplicate work, and each is about a move the search has effectively already
+tried:
+
+- No move on the previous move's face, since two turns of one face are one turn of it.
+- Only one order of every commuting pair, since opposite faces commute and `U D` and `D U`
+  are the same cube by two routes. Dropping one order removes a tenth of the branching at
+  every level, which is a factor of three over a phase-1 target of eleven.
+- No phase-1 solution whose last move is a phase-2 move. A phase-2 move keeps G1, so the cube
+  was already in G1 one move earlier, and that same total sequence was on offer at a target
+  one shorter, where it was either found or ruled out on length.
+
+The first two hold **across the junction** as well, so phase 2's first move is constrained by
+phase 1's last and the two phases can never emit a pair of tokens the emitter would have to
+merge. That is checked on the tokens rather than argued, because a merge at the phase boundary
+is exactly the bug this rule exists to prevent and it looks like nothing in the move indices.
+
+### The second aim: the same cube, inverted
+
+One ladder is not quite enough. A small share of cubes have no split at all that fits inside
+21 in the orientation they arrive in, so a run climbs the ladder for two cubes at once, the one
+it was handed and that one inverted. A solution of either is a solution of the other read
+backwards, so both answer the same question, and the second doubles the decompositions on
+offer at every depth. It is close to free: a phase-1 target costs about thirteen times the one
+below it, so nearly all the work is in the deepest rung and the second aim's deepest rung is
+only reached when the first came back empty.
+
+Measured over 20,000 sampled states, one aim alone fails to find a split inside 21 for 212 of
+them; the pair fails for 9, a factor of 23. That is the reason it exists, and it is the cheap
+half of what min2phase does: it runs six aims, three whole-cube rotations of each of the two,
+and the inverse is the one of the six that needs no cube geometry beyond inverting a
+permutation.
+
+A cube that is its own inverse offers the second aim nothing, both searches being the same
+search, so `tries` drops to one for it. The superflip is the one everybody names.
+
+### The branch order is random, for plan 01's reason
+
+The rng shuffles the candidate moves at every node of both phases, and it is the same defect
+being avoided as in the exact-length search above: a scramble is the solution written
+backwards, so the **last** token of the scramble is the **first** branch the root ever tried,
+and a fixed order pins the tail of every scramble the program emits. The regression test is
+the same one too, on the distribution of final tokens over a few hundred seeds.
+
+The shuffle reads its digits out of one 64-bit draw rather than one draw per swap. The moduli
+multiply out to eighteen factorial at worst, which leaves a `u64` three orders of magnitude
+spare, so the digits are as good as separate draws; and one draw in place of seventeen is what
+keeps a node cheap, the search visiting millions of them for one scramble.
+
+### Sampling, and the one state that is resampled
+
+`mod.rs` draws a uniformly random legal state as TNoodle's `Tools.randomCube()` does: `cp` a
+uniform permutation of 8, `ep` a uniform permutation of 12, and if the two parities differ,
+one swap of `ep[0]` and `ep[1]` to reconcile them, because corner and edge parity cannot come
+apart on a cube that was never taken to pieces. Orientation carries its last piece, seven free
+corner twists leaving the eighth determined and eleven free edge flips leaving the twelfth.
+
+Uniformity survives the repair, which is worth saying because it is the step that looks like
+it would break it: swapping a fixed pair of edges is a bijection between the odd and the even
+permutations, so `ep` stays uniform over whichever parity class `cp` picked out.
+
+One state is then drawn again if it comes up: solved, whose scramble is the empty string.
+That is TNoodle's minimum-distance rule, which on a 3x3 has exactly one state to exclude out
+of 4.3 times 10^19, so the loop will never run in practice and exists so that "a scramble is
+never empty" is a property of the code rather than of the odds.
+
+### Table lifecycle and cost
+
+Two `OnceLock`s, and the ordering between them is the thing to know: **`prune`'s lock sits
+above `coords`'s and never below it.** The pruning sweep reads the move tables, so one lock
+holding both would deadlock initializing itself, which is the same trap the tabled puzzles
+have and the same resolution. Within `coords` one lock covers all six move tables, because
+nothing under that initializer reaches back for a table: a row is built by decoding a value,
+turning the cubies directly, and encoding again.
+
+| What | Size |
+| --- | --- |
+| Six move tables, `u16` | about 1.7 MB |
+| Four pruning tables, `u8` | about 3.8 MB |
+
+Both are built on the first 3x3 scramble, never at startup by any explicit call and never in
+the draw loop. Measured in release, the build is about 0.397 s, and because the 3x3 is the
+default session it is normally paid while the first frame is being prepared: `App::new` to a
+scramble in hand is about 0.40 s all told. Every scramble after it is one solve, which averages
+12 ms over a 50-seed batch; the slowest of that batch was 120 ms, a cube far from G1 costing
+many times one that is close. That spread is why the number to quote is the mean and not a
+single sample.
+
+### What comes out, and the two honest caveats
+
+Emission is TNoodle's: the solution written backwards with every move complemented, so power
+p becomes 4 - p, single-spaced, six faces with `'` and `2` suffixes and no two consecutive
+tokens sharing a face. Length is whatever the solution needed. Over 20,000 seeded states:
+
+| Moves | 16 | 17 | 18 | 19 | 20 | 21 | past 21 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Scrambles | 3 | 12 | 80 | 589 | 3,159 | 16,148 | 9 |
+
+**Solutions run about a move longer than min2phase's.** The mean is 20.77 over that batch, and
+20.84 over the 300-seed sweep the test suite runs; min2phase typically lands at 19 to 20. The
+gap is not a correctness question, the state being drawn uniformly either way and the emitted
+scramble genuinely reaching it. It is the price of a weaker search: two aims against six, and
+pruning tables without the symmetry reduction min2phase uses to make its bound tighter for the
+same memory. Four fifths of Cubetimer's solutions land at exactly 21, which is what a search
+that usually needs the whole budget looks like.
+
+**Nine scrambles in 20,000 exceeded 21 moves**, coming out at 23, 24 or 25. When neither aim
+decomposes inside 21, `solve` raises the cap to `MAX_PHASE1 + MAX_PHASE2` and runs again,
+which cannot fail: some phase-1 target within 12 has a solution and every cube in G1 is within
+18 of solved. That is a deliberate choice about which failure to have. TNoodle covers the same
+theoretical case by searching harder under a 60 second timeout, and a scramble generator that
+occasionally stalls for seconds in the draw path is a worse thing to ship than one that
+occasionally emits a scramble a few moves longer than it meant to. It is still a genuine
+random-state scramble; it is just not inside the cap. Closing that gap means more aims or
+better tables, not a longer timeout.
+
+### The correctness anchor is the cross-model bridge
+
+The tabled puzzles are pinned by published state counts per depth, and the 3x3 has no such
+histogram to check against, so its anchor is a different one and it is stronger: **a test-only
+bridge maps `crate::cube::Cube` at size 3 into `Cubies`** by reading each corner's three
+stickers and each edge's two, naming the piece from its colour set and its orientation from
+which slot holds the piece's own reference colour. The two models, written from opposite
+directions and sharing no code, are then asserted to agree on every one of the eighteen moves
+from batches of random states. Every solve in the test suite
+then goes through it twice over: the solution is played on the cubie model and asserted to
+reach solved, and the emitted scramble is played on the facelet model and asserted to reach
+the state that was sampled.
+
+Two published facts sit beside it. The superflip, every edge flipped and nothing else moved,
+needs exactly 20 moves optimally; the solver is asserted to solve it in 20 or 21, since a
+two-phase decomposition is not required to find the optimum. And a walk of phase-2 moves lands
+in G1, so a cube built that way must be solved with no phase-1 move at all, which is what
+exercises the junction with nothing behind it.
 
 ---
 

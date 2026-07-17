@@ -1,9 +1,9 @@
 //! Scramble generation in WCA notation, one generator per puzzle family.
 //!
-//! Nine events scramble by random moves, from the modules below. 2x2, Pyraminx and Skewb
-//! are random-state and come from `crate::solver`, which draws a uniformly random legal
-//! state and emits the moves that reach it. Either way [`generate`] and [`generate_with_rng`]
-//! are the only way in and always hand back a scramble.
+//! Seven events scramble by random moves, from the modules below. The 2x2, the 3x3,
+//! one-handed, Pyraminx and Skewb are random-state and come from `crate::solver`, which draws
+//! a uniformly random legal state and emits the moves that reach it. Either way [`generate`]
+//! and [`generate_with_rng`] are the only way in and always hand back a scramble.
 
 mod clock;
 mod cube;
@@ -22,21 +22,22 @@ pub fn generate(puzzle: Puzzle) -> String {
 /// The same scramble, drawing randomness from `rng` so a seed always repeats.
 pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
     match puzzle {
-        // The three events `solver` answers for, whose scrambles are random-state.
-        Puzzle::Cube2 | Puzzle::Pyraminx | Puzzle::Skewb => random_state(puzzle, rng),
-        Puzzle::Cube3 | Puzzle::Cube4 | Puzzle::Cube5 | Puzzle::Cube6 | Puzzle::Cube7 => {
+        // The events `solver` answers for, whose scrambles are random-state. One-handed is a
+        // 3x3 with a hand behind your back and takes the same 3x3 path, so it comes through
+        // here rather than being mapped onto `Puzzle::Cube3` first.
+        Puzzle::Cube2 | Puzzle::Cube3 | Puzzle::Oh | Puzzle::Pyraminx | Puzzle::Skewb => {
+            random_state(puzzle, rng)
+        }
+        Puzzle::Cube4 | Puzzle::Cube5 | Puzzle::Cube6 | Puzzle::Cube7 => {
             cube::scramble(puzzle, rng)
         }
-        // One-handed is a 3x3 with a hand behind your back, so it takes the 3x3 generator
-        // verbatim. Mapping it here is also what keeps `cube` a function of cube variants only.
-        Puzzle::Oh => cube::scramble(Puzzle::Cube3, rng),
         Puzzle::Megaminx => megaminx::scramble(rng),
         Puzzle::Square1 => square1::scramble(rng),
         Puzzle::Clock => clock::scramble(rng),
     }
 }
 
-/// The random-state scramble for one of the three events `solver` knows how to solve.
+/// The random-state scramble for one of the events `solver` knows how to solve.
 ///
 /// `solver::scramble` returns None for every other event, and the arm above is what makes
 /// that case unreachable, so nothing outside this module ever sees an `Option`.
@@ -51,6 +52,14 @@ mod tests {
     use crate::types::Puzzle;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    /// What a 3x3 scramble aims at, and what the solver can promise if it misses.
+    ///
+    /// The two-phase search targets 21 moves and falls back to the sum of its two phase maxima
+    /// for the rare state it cannot split that small, measured at 9 in 20,000. So 21 is the
+    /// number to assert a share against and 30 is the one to assert outright.
+    const CUBE3_TARGET: usize = 21;
+    const CUBE3_CEILING: usize = 30;
 
     #[test]
     fn every_puzzle_produces_a_non_empty_scramble() {
@@ -94,7 +103,7 @@ mod tests {
         s.split(' ').map(str::to_owned).collect()
     }
 
-    // The three pins below are on the dispatch rather than on `solver`: they are what says the
+    // The four pins below are on the dispatch rather than on `solver`: they are what says the
     // random-state events are wired to the right generator and not merely that it works.
 
     #[test]
@@ -150,22 +159,59 @@ mod tests {
     }
 
     #[test]
-    fn a_one_handed_scramble_is_twenty_moves_of_3x3_notation() {
-        for seed in 0..50u64 {
-            let s = generate_with_rng(Puzzle::Oh, &mut StdRng::seed_from_u64(seed));
-            let moves: Vec<&str> = s.split(' ').collect();
-            assert_eq!(moves.len(), 20, "seed {seed} gave {s}");
-            for m in moves {
-                let (face, suffix) = m.split_at(1);
+    fn a_3x3_scramble_arrives_as_about_twenty_moves_of_the_six_faces() {
+        // Both events that take the two-phase solver, because the dispatch sends them through
+        // it separately. The length is not fixed the way the tabled puzzles' is: a random state
+        // needs whatever it needs, so the pins are the ceiling, the share inside the target and
+        // the mean below.
+        const SEEDS: u64 = 100;
+        for puzzle in [Puzzle::Cube3, Puzzle::Oh] {
+            let mut total = 0usize;
+            let mut inside = 0usize;
+            for seed in 0..SEEDS {
+                let tokens = tokens(puzzle, seed);
                 assert!(
-                    matches!(face, "U" | "D" | "L" | "R" | "F" | "B"),
-                    "{m} is not a 3x3 outer face"
+                    (1..=CUBE3_CEILING).contains(&tokens.len()),
+                    "{} seed {seed} gave {} moves: {tokens:?}",
+                    puzzle.name(),
+                    tokens.len()
                 );
+                inside += usize::from(tokens.len() <= CUBE3_TARGET);
+                total += tokens.len();
+                for token in &tokens {
+                    let (face, suffix) = token.split_at(1);
+                    assert!(
+                        matches!(face, "U" | "D" | "L" | "R" | "F" | "B"),
+                        "{token} is not a 3x3 outer face"
+                    );
+                    assert!(
+                        matches!(suffix, "" | "'" | "2"),
+                        "{token} carries a suffix 3x3 notation does not use"
+                    );
+                }
+                // Two turns of one face are one turn of it, so a scramble that names a face
+                // twice running has lost a move somewhere in the solver or the emitter.
+                let faces: Vec<&str> = tokens.iter().map(|t| t.split_at(1).0).collect();
                 assert!(
-                    matches!(suffix, "" | "'" | "2"),
-                    "{m} carries a suffix 3x3 notation does not use"
+                    faces.windows(2).all(|pair| pair[0] != pair[1]),
+                    "{} seed {seed} turns one face twice running: {tokens:?}",
+                    puzzle.name()
                 );
             }
+            // A uniformly random state almost never falls within 17 moves of solved, so a mean
+            // this side of 17.5 means the sampler is drawing something other than a real state.
+            let mean = total as f64 / SEEDS as f64;
+            assert!(
+                mean > 17.5,
+                "{} averaged {mean} moves over {SEEDS} seeds, too short for a random state",
+                puzzle.name()
+            );
+            // The fallback past the target is the rare exception, not a second normal path.
+            assert!(
+                inside * 20 >= SEEDS as usize * 19,
+                "{} kept only {inside} of {SEEDS} scrambles inside {CUBE3_TARGET} moves",
+                puzzle.name()
+            );
         }
     }
 }

@@ -19,3 +19,8 @@ parking_lot_core = "=0.9.10"
 
 [profile.release]
 lto = true
+
+# The solvers build million-cell tables and search millions of nodes per scramble, which
+# unoptimized costs the suite minutes rather than seconds; opt-level 1 keeps debug info.
+[profile.test]
+opt-level = 1
