@@ -38,13 +38,13 @@ test crate. Colocation buys access to private items, which matters here: `trim_c
 `average_window`, `is_legal`, `tmp_path` and the private fields of `App` are all tested
 directly.
 
-Current state, 102 tests, all green:
+Current state, 114 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `app.rs` | 52 | State machine, keys, `/commands`, persistence side effects |
+| `app.rs` | 59 | State machine, keys, `/commands`, persistence side effects |
 | `stats.rs` | 31 | Trimmed averages, penalties, session stats, personal bests |
-| `storage.rs` | 11 | Round trips, atomic write, missing versus corrupt files |
+| `storage.rs` | 16 | Round trips, atomic write, missing versus corrupt files, version migration |
 | `scramble.rs` | 8 | Move pools, lengths, the legality rule, determinism |
 | `types.rs` | 0 | Formatting is covered indirectly through `stats` and `app` |
 | `ui.rs` | 0 | Not covered on purpose |

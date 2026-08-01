@@ -25,8 +25,8 @@ respect to state, and only `storage.rs` touches the filesystem.
 | `src/ui.rs` | Every widget drawn, the block font, layout degradation | `app`, `stats`, `types` |
 | `src/scramble.rs` | Scramble generation per puzzle | `types`, `rand` |
 | `src/stats.rs` | Averages, session summaries, personal bests | `types` |
-| `src/storage.rs` | Data file location, JSON load and atomic save, wall clock | `types` |
-| `src/types.rs` | `Puzzle`, `Penalty`, `Solve`, `Session`, `SaveFile`, time formatting | serde only |
+| `src/storage.rs` | Data file location, JSON load and atomic save, format migration, wall clock | `types` |
+| `src/types.rs` | `Puzzle`, `Penalty`, `Solve`, `Session`, `SaveFile`, the default-session ids, time formatting | serde only |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
 to persistence or rendering never ripples into it. The dependency graph is acyclic and
@@ -296,11 +296,12 @@ unrecognised produces `unknown command: <verb>` in the status line.
 
 | Command | Effect |
 | --- | --- |
-| `/2x2` … `/7x7` | Switch puzzle (see the retype rule below) |
+| `/2x2` … `/7x7` | Activate that puzzle's default session (see the navigation rule below) |
 | `/new [name]` | Create and activate a session for the current puzzle |
 | `/sessions` | List every session as `id:name(puzzle)[count]` |
 | `/session <id>` | Activate a session by id, adopting its puzzle |
-| `/rename <name>` | Rename the active session |
+| `/rename <name>` | Rename the active session, refused on a default |
+| `/delsession [id]` | Delete a session and its solves, the active one by default |
 | `/del`, `/delete` | Remove the most recent solve |
 | `/dnf`, `/+2`, `/ok` | Set the most recent solve's penalty |
 | `/inspect` | Toggle 15-second inspection |
@@ -313,33 +314,48 @@ degrades the app to an in-memory timer rather than killing it. `q` still quits.
 
 ---
 
-## Sessions and the puzzle-retype rule
+## Sessions and the puzzle-navigation rule
 
 A `Session` is an id, a name, a `Puzzle`, an ordered `Vec<Solve>` and a creation
 timestamp. `SaveFile` holds all of them plus `active_session_id` and a monotonic
 `next_session_id`. Solves are append-ordered, and every statistic in `stats.rs` reads that
 ordering as chronological.
 
+**Ids 1 through 6 are reserved for the six permanent default sessions**, one per puzzle,
+all named `default`, in the order given by `Puzzle::DEFAULT_ORDER`: 3x3, 2x2, 4x4, 5x5,
+6x6, 7x7. `Puzzle::default_session_id` is that mapping, `FIRST_USER_ID` is 7, and
+`Session::is_default` is the single predicate everything else asks (`id < FIRST_USER_ID`).
+A default cannot be deleted, renamed or retyped; its solves behave like any others. The
+point is that every puzzle has one destination that always exists, so navigation never has
+to invent a session or guess at the "right" one.
+
 `App::new` runs `sanitize` over the loaded file before anything else touches it, so the
-rest of the code can assume three invariants without re-checking them: at least one
-session exists, `active_session_id` points at a real session, and `next_session_id` is
-greater than every existing id. A hand-edited or truncated file is repaired rather than
-rejected, which is a different question from a *corrupt* file (see persistence below).
+rest of the code can assume four invariants without re-checking them: all six defaults
+exist, sessions are ordered by id, `active_session_id` points at a real session, and
+`next_session_id` clears both every id in use and the whole reserved range. A missing
+default is recreated empty, a dangling active id falls back to the 3x3 default. This is
+structural repair of a hand-edited or truncated file, which is a different question from
+reading an older format (that is `storage::load`'s job, below) and from a *corrupt* file.
 
 The interesting rule is what `/4x4` does when you are sitting in a 3x3 session.
 
-**If the current session has no solves, it is retyped in place.** The id and the name are
-kept, only `puzzle` changes, and the status line says `session '<name>' is now 4x4`. An
-empty session is not committed to anything, and a fresh install should not accumulate a
-graveyard of untouched sessions just because someone tried a few puzzles before settling
-on one.
+**If the current session is one you created and has no solves, it is retyped in place.**
+The id and the name are kept, only `puzzle` changes, and the status line says
+`session '<name>' is now 4x4`. An empty session is not committed to anything, and someone
+who makes a session and immediately picks a different puzzle should not be left with a
+stray.
 
-**If the current session has solves, it keeps its puzzle forever.** Its statistics are
-pinned to one event, and an ao12 that mixes 3x3 and 4x4 times is meaningless. Cubetimer
-instead activates the most recently created session of the target puzzle, ordering by
-`(created_at, id)` so ties break deterministically, and creates one named `default` if
-none exists. Either way the scramble is regenerated for the new puzzle and the file is
-saved.
+**In every other case the command navigates to `puzzle.default_session_id()`.** That
+covers both a session with solves, whose statistics are pinned to one event because an
+ao12 mixing 3x3 and 4x4 times is meaningless, and a default session, which is never
+retyped even when empty. The destination is a fixed id rather than the most recently
+created session, so `/3x3` and `/4x4` are round trips: the same two sessions, every time.
+Either way the scramble is regenerated for the new puzzle and the file is saved.
+
+`/delsession` removes a session and its solves outright. It resolves its argument to the
+active session when there is none, refuses defaults and unknown ids with a status message,
+and when the session being deleted is the active one it activates that session's puzzle
+default, which is guaranteed to exist by the invariant above.
 
 `/new` names an unnamed session `session N`, where N is one more than the number of
 existing sessions for that puzzle, so the counter is per-puzzle rather than global. Any
@@ -377,6 +393,38 @@ cubetimer: could not read your save file.
 Refusing to start so your data is not overwritten. Fix, move or delete that file
 and run cubetimer again.
 ```
+
+### Versions and the migration to 2
+
+`SaveFile.version` is the format number and `types::SAVE_VERSION` is what this build
+writes, currently 2. `load` sorts a parsed file into three cases:
+
+- **Newer than `SAVE_VERSION`**: refused with an `InvalidData` error naming the path and
+  both versions. Fields this build does not know about could mean anything, and saving over
+  them would discard them, so a downgrade must not start.
+- **Equal**: returned untouched.
+- **Older**: migrated in memory by `migrate_to_v2`. Nothing is written back until the app
+  next saves, so a failed run leaves the old file exactly as it was.
+
+Version 1 predates the reserved id range: it had a single session named `default` on 3x3
+and handed out ids from 1, so an old id 2 collides with what is now the 2x2 default.
+`migrate_to_v2` builds the six defaults, then walks the old sessions in file order. One
+named `default` folds into its puzzle's new default, carrying its solves and `created_at`,
+which is what keeps a user's 3x3 history on the session `/3x3` now leads to. Everything
+else keeps its name, puzzle, solves and relative order and is renumbered from
+`FIRST_USER_ID`, including a second session called `default` for a puzzle already claimed.
+`active_session_id` follows whichever session it pointed at, and `next_session_id` ends up
+past every renumbered id.
+
+Migration lives in `storage.rs` because it is a question about the shape of a file on
+disk, and `storage.rs` is the only module that reads one. `App::sanitize` stays what it
+was, structural repair of an already-current file, and by the time it runs the version
+question has been settled.
+
+Changing the serde shape again means bumping `SAVE_VERSION`, writing the next migration
+step in the same change, and adding a fixture test with hand-written JSON of the old
+format rather than a struct literal, since a struct literal would silently follow the new
+shape.
 
 `save` writes atomically. It creates parent directories, serialises to pretty JSON with a
 trailing newline, writes that to a sibling `<name>.tmp`, and renames the temporary file
