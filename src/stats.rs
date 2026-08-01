@@ -1,7 +1,4 @@
 //! Pure statistics helpers: WCA trimmed averages, session summaries, personal bests.
-//!
-//! Nothing in here touches I/O or global state — every function is a pure function of
-//! its arguments, which keeps it trivially testable.
 
 use crate::types::{Session, Solve};
 
@@ -29,9 +26,7 @@ impl AvgResult {
     }
 }
 
-/// How many solves are trimmed from *each* end of an aoN: `ceil(n / 20)`.
-///
-/// 1 for ao5 / ao12, 2 for ao21..ao40, 5 for ao100.
+/// Solves trimmed from each end of an aoN: `ceil(n / 20)` (1 for ao5/ao12, 5 for ao100).
 fn trim_count(n: usize) -> usize {
     n.div_ceil(20)
 }
@@ -50,7 +45,7 @@ fn cmp_effective(a: &Option<u64>, b: &Option<u64>) -> Ordering {
 fn average_window(window: &[Solve]) -> AvgResult {
     let n = window.len();
     let trim = trim_count(n);
-    // Degenerate windows (n == 0, and n <= 2*trim, i.e. n <= 2) leave nothing to average.
+    // n <= 2 * trim leaves nothing to average.
     if n == 0 || n <= 2 * trim {
         return AvgResult::NotEnough;
     }
@@ -63,17 +58,12 @@ fn average_window(window: &[Solve]) -> AvgResult {
 
     times.sort_by(cmp_effective);
     let kept = &times[trim..n - trim];
-    // Safe: DNFs sort last and there are at most `trim` of them, so they all land in the
-    // trimmed tail.
+    // Safe: DNFs sort last and number at most `trim`, so they all land in the trimmed tail.
     let sum: u128 = kept.iter().map(|t| t.unwrap_or(0) as u128).sum();
     AvgResult::Time((sum / kept.len() as u128) as u64)
 }
 
-/// WCA trimmed average of the LAST `n` solves (the most recent `n` in the slice's tail).
-///
-/// Trims `ceil(n/20)` best and worst. DNF sorts as worst; more DNFs than the trim count
-/// yields [`AvgResult::Dnf`]. Fewer than `n` solves yields [`AvgResult::NotEnough`].
-/// The result is the mean of the remaining solves, truncated to whole milliseconds.
+/// WCA trimmed average of the last `n` solves: DNF sorts worst, mean truncated to ms.
 pub fn average_of(n: usize, solves: &[Solve]) -> AvgResult {
     if n == 0 || solves.len() < n {
         return AvgResult::NotEnough;
@@ -81,9 +71,7 @@ pub fn average_of(n: usize, solves: &[Solve]) -> AvgResult {
     average_window(&solves[solves.len() - n..])
 }
 
-/// Best rolling aoN anywhere in the session.
-///
-/// Returns `None` if there were never enough solves, or if every window was a DNF average.
+/// Best rolling aoN in the session; `None` if never enough solves or every window DNF'd.
 pub fn best_average_of(n: usize, solves: &[Solve]) -> Option<u64> {
     if n == 0 || solves.len() < n {
         return None;
@@ -160,9 +148,7 @@ fn keep_min(slot: &mut Option<u64>, candidate: Option<u64>) {
     }
 }
 
-/// All-time PBs across the given sessions (the caller filters to a single puzzle).
-///
-/// Rolling averages are computed per session; windows never span a session boundary.
+/// All-time PBs across the given sessions; rolling windows never span a session boundary.
 pub fn personal_bests(sessions: &[&Session]) -> PersonalBests {
     let mut pb = PersonalBests::default();
     for session in sessions {
@@ -334,8 +320,7 @@ mod tests {
             s(9_000),
             s(20_000),
         ];
-        // Effective: 11.000, 12.000, 13.000, 9.000, 20.000
-        // trim 9.000 and 20.000 -> mean(11,12,13) = 12.000
+        // Effective 9/11/12/13/20 -> trim 9.000 and 20.000 -> mean(11,12,13) = 12.000
         assert_eq!(average_of(5, &v), AvgResult::Time(12_000));
     }
 
@@ -373,8 +358,7 @@ mod tests {
 
     #[test]
     fn mean_is_truncated_not_rounded() {
-        // kept = 1000, 1001, 1002 -> sum 3003 / 3 = 1001 exactly; shift by 1ms to force
-        // a non-integer mean: kept = 1000, 1001, 1001 -> 3002/3 = 1000.67 -> 1000.
+        // Kept = 1000, 1001, 1001 -> 3002/3 = 1000.67, truncated to 1000.
         let v = solves(&[1, 1_000, 1_001, 1_001, 99_999]);
         assert_eq!(average_of(5, &v), AvgResult::Time(1000));
     }
@@ -516,8 +500,7 @@ mod tests {
         assert_eq!(st.best, Some(10_000));
         assert_eq!(st.worst, Some(14_000));
         assert_eq!(st.mean, Some((10_000 + 14_000 + 12_500 + 13_000 + 11_000) / 5));
-        // ao5 over the last five: 14.000, DNF, 12.500, 13.000, 11.000
-        // trim DNF and 11.000 -> mean(12.500, 13.000, 14.000) = 13.166
+        // ao5 over the last five: trim DNF and 11.000 -> mean(12.500, 13.000, 14.000).
         assert_eq!(
             st.ao5,
             AvgResult::Time((12_500 + 13_000 + 14_000) / 3)
@@ -566,8 +549,7 @@ mod tests {
         let b = session(2, &[9_000, 10_000, 11_000, 12_000, 13_000]);
         let pb = personal_bests(&[&a, &b]);
         assert_eq!(pb.single, Some(5_000));
-        // a: best ao5 window -> trim 5.000/30.000 -> 30.000 ; also all-30 window -> 30.000
-        // b: trim 9.000/13.000 -> mean(10,11,12) = 11.000
+        // a's best ao5 window is 30.000; b's is mean(10,11,12) = 11.000.
         assert_eq!(pb.ao5, Some(11_000));
         assert_eq!(pb.ao12, None);
         assert_eq!(pb.ao100, None);
