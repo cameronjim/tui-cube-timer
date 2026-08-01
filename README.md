@@ -106,6 +106,7 @@ spaces do not matter.
 | Command | What it does |
 |---|---|
 | `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch to that puzzle's default session (see below) |
+| `/pyraminx` `/skewb` `/megaminx` `/sq1` `/clock` | the same, for the five non-cube events |
 | `/new [name]` | start a new session for the current puzzle |
 | `/sessions` | list every session with its id, puzzle and solve count |
 | `/session <id>` | switch to a session by id |
@@ -117,20 +118,33 @@ spaces do not matter.
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
+The longer puzzle names have short forms: `/pyra` for `/pyraminx`, `/mega` for
+`/megaminx`, and `/square1` or `/square-1` for `/sq1`.
+
 ## Sessions and puzzles
 
 A session is just an ordered list of solves for one puzzle, with a name and an
-id. Every save file has six permanent ones called `default`, one per puzzle:
-3x3 is id 1, then 2x2, 4x4, 5x5, 6x6 and 7x7 as ids 2 to 6. Their solves are
-yours to penalise and delete as usual, but the sessions themselves cannot be
-renamed, retyped or deleted, so `/4x4` always has somewhere to land. `/new`
-gives you as many sessions of your own as you want, with ids from 7 up, and
-without a name they are numbered for you.
+id. Every save file has eleven permanent ones called `default`, one per puzzle:
+
+| id | puzzle | id | puzzle |
+|---|---|---|---|
+| 1 | 3x3 | 7 | pyraminx |
+| 2 | 2x2 | 8 | skewb |
+| 3 | 4x4 | 9 | megaminx |
+| 4 | 5x5 | 10 | sq1 |
+| 5 | 6x6 | 11 | clock |
+| 6 | 7x7 | | |
+
+Their solves are yours to penalise and delete as usual, but the sessions
+themselves cannot be renamed, retyped or deleted, so `/4x4` always has somewhere
+to land. `/new` gives you as many sessions of your own as you want, with ids
+from 12 up, and without a name they are numbered for you.
 
 A save file written by an older Cubetimer is brought up to this layout when it
-is read: the old `default` session keeps its solves and becomes the default for
-its puzzle, and anything else you had made keeps its name and times under a new
-id.
+is read, however far back it came from. The old `default` session keeps its
+solves and becomes the default for its puzzle, and anything else you had made
+keeps its name and times, moving to a new id if the one it held is now reserved
+for one of the new events.
 
 Puzzle switching is built around one rule: a session that has solves in it never
 changes puzzle, because that would mix two events into one set of stats. So
@@ -146,7 +160,7 @@ you in the same two places every time.
 `/delsession` throws a session away along with its solves. With no argument it
 takes the one you are in, and with an id it takes that one, so you can clear out
 a session without switching to it first. Deleting the session you are in leaves
-you on the default for its puzzle. The six defaults are refused.
+you on the default for its puzzle. The eleven defaults are refused.
 
 ## Where your times live
 
@@ -189,13 +203,38 @@ each session rather than across the seam between two of them.
 
 ## Scrambles
 
-Scrambles are random-move and follow the usual WCA conventions for each cube
-size, with the standard constraints that stop a scramble from undoing itself, so
-the move count you see is the move count you turn. On 5x5, 6x6 and 7x7 they come
-out of the same generation the official scramble program uses. On 2x2 through
-4x4 they are a close practice equivalent rather than a competition-legal
-scramble. Press `n` any time you want a different one. Each solve is stored
-alongside the scramble it was done on.
+Every puzzle scrambles in official WCA notation and follows the conventions of
+its event, so what you read is what you turn: no move undoes the one before it,
+Pyraminx tips come last in `u l r b` order, Megaminx uses Pochmann notation,
+Square-1 alternates twists and slashes and never asks for a slash the puzzle
+cannot make, and Clock walks the fourteen dials with the `y2` flip in the
+middle. Press `n` any time you want a different scramble. Each solve is stored
+alongside the one it was done on.
+
+How close each event gets to a competition scramble varies, and it is worth
+being plain about it:
+
+- **Clock** is exactly official. Its dials commute, so drawing each one at
+  random already gives a uniformly random state, which is all the official
+  generator does.
+- **Megaminx** matches the official generator move for move. It is a random-move
+  event even in competition, and Cubetimer reproduces the same seven lines with
+  the same rules.
+- **5x5, 6x6 and 7x7** use the same random-move generation the official scramble
+  program uses, with the same move pools and lengths.
+- **2x2, 3x3, 4x4, Pyraminx, Skewb and Square-1** are honest practice
+  approximations. Official scrambles for these are generated from a random
+  state and solved back into moves; Cubetimer picks the moves and takes whatever
+  state comes out. The lengths match real scrambles and they are perfectly good
+  to train on, but they are not competition-legal.
+
+Megaminx scrambles run to seven lines, and the scramble area at the top of the
+screen grows to fit them, up to a point: it will not eat so much of the window
+that the timer loses its big digits.
+
+If you last solved Clock a few years ago, note that official scrambles stopped
+including pin states in January 2024. Cubetimer follows the current rules, so
+you set the pins yourself.
 
 ## Under the hood
 

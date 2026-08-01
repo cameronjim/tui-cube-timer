@@ -1,4 +1,10 @@
-//! All rendering (entry point [`draw`]), read-only over [`App`] and saturating throughout so tiny terminals degrade instead of panicking.
+//! All rendering (entry point [`draw`]), read-only over [`App`].
+//!
+//! Every value shown is already on `App`, including the statistics: this runs on the 15 ms
+//! tick, so it reads and never computes. The geometry lives in [`layout`], and is saturating
+//! throughout so tiny terminals degrade instead of panicking.
+
+mod layout;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -7,8 +13,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, InputMode, TimerState};
-use crate::stats::{self, PersonalBests, SessionStats};
-use crate::types::{format_millis, format_solve, Penalty, Puzzle, Session};
+use crate::types::{format_millis, format_solve, Penalty, Puzzle};
+use layout::{
+    centered, footer_height, header_height, inner_of, puzzle_help_rows, HELP_KEY_W, HELP_W,
+};
 
 // ---------------------------------------------------------------- palette
 
@@ -38,16 +46,6 @@ fn panel(title: &str) -> Block<'static> {
     }
 }
 
-/// Inner area of a bordered block, guarding against rects too small to have one.
-fn inner_of(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    }
-}
-
 // ------------------------------------------------------------ entry point
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -57,8 +55,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 
     // Header / body / status; on short terminals the body collapses to zero rows and clips.
-    let header_h = if area.height >= 9 { 4 } else { 3 };
-    let footer_h = if area.height >= 6 { 3 } else { 0 };
+    let footer_h = footer_height(area);
+    let header_h = header_height(&app.scramble, area, footer_h);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -98,10 +96,16 @@ fn draw_scramble(frame: &mut Frame, app: &App, area: Rect) {
         .fg(C_ACCENT)
         .add_modifier(Modifier::BOLD);
 
+    // Megaminx scrambles arrive as seven newline-separated lines; every other puzzle is one.
     let text = if app.scramble.is_empty() {
         Text::from(Line::styled("(no scramble)", dim()))
     } else {
-        Text::from(Line::styled(app.scramble.clone(), scramble_style))
+        Text::from(
+            app.scramble
+                .split('\n')
+                .map(|line| Line::styled(line, scramble_style))
+                .collect::<Vec<Line>>(),
+        )
     };
 
     let p = Paragraph::new(text)
@@ -308,22 +312,12 @@ fn stat_span<'a>(label: &'a str, value: String, color: Color) -> Vec<Span<'a>> {
     ]
 }
 
-fn puzzle_sessions(app: &App) -> Vec<&Session> {
-    let puzzle = app.current_session().puzzle;
-    app.save
-        .sessions
-        .iter()
-        .filter(|s| s.puzzle == puzzle)
-        .collect()
-}
-
 fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let st: SessionStats = stats::session_stats(&app.current_session().solves);
-    let sessions = puzzle_sessions(app);
-    let pb: PersonalBests = stats::personal_bests(&sessions);
+    let st = &app.stats;
+    let pb = &app.pbs;
 
     let mut l1: Vec<Span> = Vec::new();
     l1.extend(stat_span("ao5", st.ao5.display(), C_TIMING));
@@ -363,10 +357,8 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     }
     let solves = &app.current_session().solves;
     let total = solves.len();
-
-    let st = stats::session_stats(solves);
-    let best = st.best;
-    let worst = st.worst;
+    let best = app.stats.best;
+    let worst = app.stats.worst;
 
     let title = if total == 0 {
         "times".to_string()
@@ -448,22 +440,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 
 // ----------------------------------------------------------- help overlay
 
-/// A centered rect of at most `w` x `h`, always inside `area`.
-fn centered(w: u16, h: u16, area: Rect) -> Rect {
-    let width = w.min(area.width);
-    let height = h.min(area.height);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
 fn help_row<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
     Line::from(vec![
         Span::styled(
-            format!("  {:<16}", key),
+            format!("  {:<width$}", key, width = HELP_KEY_W),
             Style::default().fg(C_TIMING).add_modifier(Modifier::BOLD),
         ),
         Span::styled(desc, Style::default().fg(C_IDLE)),
@@ -478,15 +458,11 @@ fn help_head(text: &str) -> Line<'_> {
 }
 
 fn draw_help(frame: &mut Frame, area: Rect) {
-    let popup = centered(62, 26, area);
-    if popup.width < 4 || popup.height < 4 {
-        return;
-    }
-
     // Kept in sync with the supported puzzles rather than hard-coded.
-    let puzzle_help = format!("switch puzzle: {}", Puzzle::ALL.map(|p| p.name()).join(" "));
+    let names: Vec<&str> = Puzzle::ALL.iter().map(|p| p.name()).collect();
+    let puzzle_rows = puzzle_help_rows(&names);
 
-    let lines: Vec<Line> = vec![
+    let mut lines: Vec<Line> = vec![
         help_head(" keys"),
         help_row("space", "hold until green, release to start"),
         help_row("any key", "stop the running timer"),
@@ -498,7 +474,11 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("q", "quit"),
         Line::from(""),
         help_head(" commands"),
-        help_row("/<puzzle>", &puzzle_help),
+    ];
+    for (i, row) in puzzle_rows.iter().enumerate() {
+        lines.push(help_row(if i == 0 { "/<puzzle>" } else { "" }, row));
+    }
+    lines.extend([
         help_row("/new [name]", "new session for the current puzzle"),
         help_row("/sessions", "list all sessions"),
         help_row("/session <id>", "switch to session by id"),
@@ -511,7 +491,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("/quit  /q", "quit"),
         Line::from(""),
         Line::styled("  press h, ? or esc to close", dim()),
-    ];
+    ]);
+
+    // The popup follows the content, which grows with the number of puzzles.
+    let content_h = lines.len().min(u16::MAX as usize) as u16;
+    let popup = centered(HELP_W, content_h.saturating_add(2), area);
+    if popup.width < 4 || popup.height < 4 {
+        return;
+    }
 
     frame.render_widget(Clear, popup);
     let p = Paragraph::new(Text::from(lines)).block(
@@ -522,4 +509,171 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             .title(" help "),
     );
     frame.render_widget(p, popup);
+}
+
+// ------------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SaveFile, Solve};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::time::Instant;
+
+    /// The sizes every smoke test sweeps: comfortable, narrow, short, and absurd.
+    const SIZES: [(u16, u16); 4] = [(80, 30), (44, 12), (30, 8), (10, 4)];
+
+    /// One Megaminx scramble line, and the seven-line block generators emit.
+    const MEGA_LINE: &str = "R-- D++ R-- D-- R++ D++ R++ D++ R++ D++ U";
+
+    fn mega() -> String {
+        [MEGA_LINE; 7].join("\n")
+    }
+
+    /// An app on `puzzle` with `count` solves recorded, at a path nothing in these tests writes.
+    fn app_with(puzzle: Puzzle, count: usize) -> App {
+        let mut save = SaveFile::default();
+        let id = puzzle.default_session_id();
+        let session = save
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .expect("every puzzle has a default session");
+        session.solves = (0..count)
+            .map(|i| Solve {
+                millis: 8_000 + (i as u64 % 37) * 500,
+                penalty: match i % 7 {
+                    3 => Penalty::Plus2,
+                    5 => Penalty::Dnf,
+                    _ => Penalty::None,
+                },
+                scramble: "R U R' U'".to_string(),
+                timestamp: 1_700_000_000_000 + i as u64,
+            })
+            .collect();
+        save.active_session_id = id;
+        App::new(
+            save,
+            std::env::temp_dir().join("cubetimer-ui-render-test.json"),
+        )
+    }
+
+    /// Draw one frame and return every cell's symbol. Not panicking is most of the assertion.
+    fn render(app: &App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
+        terminal
+            .draw(|frame| draw(frame, app))
+            .expect("draw must not fail");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    /// Draw at all four sizes.
+    fn render_all(app: &App) {
+        for (w, h) in SIZES {
+            render(app, w, h);
+        }
+    }
+
+    #[test]
+    fn a_normal_frame_actually_draws_its_chrome() {
+        // The other tests only assert "no panic", so one of them has to prove draw wrote something.
+        let text = render(&app_with(Puzzle::Cube3, 25), 80, 30);
+        assert!(text.contains("cubetimer"), "the header title is missing");
+        assert!(text.contains("3x3"), "the puzzle name is missing");
+        assert!(text.contains("stats"), "the stats panel is missing");
+        assert!(text.contains("times"), "the times panel is missing");
+    }
+
+    #[test]
+    fn every_puzzle_renders_empty_and_populated_at_every_size() {
+        for puzzle in Puzzle::ALL {
+            for count in [0usize, 1, 25, 120] {
+                let app = app_with(puzzle, count);
+                assert!(
+                    !app.scramble.is_empty(),
+                    "{} produced no scramble",
+                    puzzle.name()
+                );
+                render_all(&app);
+            }
+        }
+    }
+
+    #[test]
+    fn a_seven_line_megaminx_scramble_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Megaminx, 30);
+        app.scramble = mega();
+        render_all(&app);
+        assert!(render(&app, 80, 30).contains("D++"), "the scramble is drawn");
+    }
+
+    #[test]
+    fn a_sixty_character_session_name_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Cube3, 5);
+        let long: String = "long session name ".repeat(4).chars().take(60).collect();
+        assert_eq!(long.chars().count(), 60);
+        app.save.sessions[0].name = long;
+        render_all(&app);
+    }
+
+    #[test]
+    fn a_times_scroll_past_the_end_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Cube3, 12);
+        app.times_scroll = usize::MAX;
+        render_all(&app);
+        app.times_scroll = 11;
+        render_all(&app);
+    }
+
+    #[test]
+    fn command_mode_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Square1, 3);
+        app.input_mode = InputMode::Command;
+        app.command_buf = "/session 12345".to_string();
+        render_all(&app);
+        assert!(render(&app, 80, 30).contains("/session 12345"));
+    }
+
+    #[test]
+    fn the_help_overlay_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Clock, 7);
+        app.show_help = true;
+        render_all(&app);
+        assert!(render(&app, 80, 40).contains("switch puzzle"));
+    }
+
+    #[test]
+    fn a_solve_over_an_hour_renders_at_every_size() {
+        let mut app = app_with(Puzzle::Cube7, 4);
+        app.state = TimerState::Timing {
+            started: Instant::now(),
+        };
+        app.display_millis = 3_723_450;
+        render_all(&app);
+        // 62:03.45 is nine glyphs wide, so 80 columns still gets the block font.
+        assert!(render(&app, 80, 30).contains('█'));
+    }
+
+    #[test]
+    fn a_status_message_and_an_inspection_countdown_render() {
+        let mut app = app_with(Puzzle::Pyraminx, 2);
+        app.status_msg = Some("no solves to delete".repeat(6));
+        render_all(&app);
+
+        app.status_msg = None;
+        app.state = TimerState::Inspecting {
+            started: Instant::now(),
+        };
+        for remaining in [Some(15i64), Some(1), Some(0), Some(-2), None] {
+            app.inspection_remaining = remaining;
+            render_all(&app);
+        }
+    }
 }

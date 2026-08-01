@@ -10,9 +10,15 @@ Each of the seven modules owns exactly one concern, and the dependency arrows on
 one way:
 
 ```
-main.rs  ->  app.rs  ->  scramble.rs, stats.rs, storage.rs, types.rs
-main.rs  ->  ui.rs   ->  app.rs (read-only), stats.rs, types.rs
+main.rs  ->  app.rs  ->  scramble/, stats.rs, storage.rs, types.rs
+main.rs  ->  ui/     ->  app.rs (read-only), types.rs
 ```
+
+`scramble/` and `ui/` are directories, not files, because one responsibility outgrew one
+file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per puzzle family;
+`ui/mod.rs` draws and `ui/layout.rs` holds the pure geometry it draws into. A directory is
+still one module for the purposes of this document: the boundary rules below apply to
+`ui/` as a whole, not to each file inside it.
 
 `types.rs` sits at the bottom and depends on nothing but `serde`. Its module doc says so
 out loud: keep it dependency-light. Anything that grows a dependency there ripples through
@@ -20,7 +26,7 @@ every other module.
 
 ### The renderer never computes
 
-`ui.rs` is a pure function of `App`. Every value that needs `Instant` math is folded into a
+`ui` is a pure function of `App`. Every value that needs `Instant` math is folded into a
 plain field by `App::on_tick` before the frame is drawn:
 
 ```rust
@@ -31,14 +37,14 @@ TimerState::Timing { started } => {
 ```
 
 ```rust
-// ui.rs, the consumer: reads the field, never the clock
+// ui/mod.rs, the consumer: reads the field, never the clock
 let text = format_millis(app.display_millis);
 ```
 
 Wrong, even though it compiles:
 
 ```rust
-// ui.rs
+// ui/mod.rs
 if let TimerState::Timing { started } = app.state {
     let text = format_millis(started.elapsed().as_millis() as u64);
 }
@@ -47,6 +53,20 @@ if let TimerState::Timing { started } = app.state {
 That version makes the frame time part of the displayed value, puts timer semantics in two
 places, and makes the state machine untestable without a renderer. If the UI needs a new
 derived value, add a field to `App` and refresh it where the state changes.
+
+The same rule covers statistics, and there it also guards a performance cliff. `App::stats`
+and `App::pbs` are refreshed by `App::refresh_derived` at every mutation site, and the
+renderer reads them:
+
+```rust
+// ui/mod.rs
+let st = &app.stats;
+let pb = &app.pbs;
+```
+
+Calling `stats::personal_bests` from `draw` instead would put a walk over every solve of
+every session of the puzzle inside a loop that runs every 15 ms. Anything the renderer needs
+that is not `O(what is on screen)` belongs in a cached field.
 
 ### One owner per decision
 
@@ -68,7 +88,7 @@ list it did not receive as an argument, which is what keeps it a pile of pure fu
 
 ### Reaching around, and what to do instead
 
-Reaching around looks like `ui.rs` opening a file, `stats.rs` calling `storage::now_millis`,
+Reaching around looks like `ui` opening a file, `stats.rs` calling `storage::now_millis`,
 or a caller poking `app.save.sessions[0]` instead of using `current_session()`. When you
 need something a module does not expose, add the narrowest possible method to that module
 and call it. `App::current_session`, `App::current_session_mut` and `App::armed_ready` all
@@ -78,10 +98,24 @@ everybody else.
 ### Splitting a file
 
 The split line is roughly 500 lines of non-test code, and it is a responsibility split, not
-a line-count split. If `app.rs` needs to grow, the natural seam is already marked by the
-`// ----- command mode` banner: the `/command` parser and its `cmd_*` handlers move out
-together, taking their tests with them, and `App` keeps the state machine. Never split by
-"first half, second half".
+a line-count split. Never split by "first half, second half".
+
+`scramble/` and `ui/` show what a good split looks like. `scramble/` divides by puzzle
+family, because the generators share nothing but the `Rng` they are handed. `ui/` divides
+by kind of work: `mod.rs` draws, `layout.rs` computes geometry and touches neither `Frame`
+nor `App`, which turned the degradation rules from something checked by eye into ordinary
+unit tests. Both splits made the code more testable, which is the sign you cut in the right
+place.
+
+`app.rs` is at 765 non-test lines and is the file to split next. Two seams are marked:
+
+- **Save-file structural repair.** `sanitize`, `free_next_id`, `take_id`, `dedupe_ids` and
+  `evict_misfiled_defaults` are pure functions of a `SaveFile` that answer one question,
+  "is this file internally consistent", and none of them touch the timer. They are the
+  cleaner cut of the two and the one to take first.
+- **Command mode.** The `// ----- command mode` banner already marks it: the `/command`
+  parser and its `cmd_*` handlers move out together, taking their tests with them, and
+  `App` keeps the state machine.
 
 ## Comments
 
@@ -217,7 +251,7 @@ there leaves the terminal in raw mode with no cursor. In practice:
   least one session exists, the active id points at a real session, and `next_session_id`
   cannot collide.
 - Saturating and checked arithmetic at the edges: `saturating_sub` for scroll positions,
-  `saturating_add` for ids, saturating `Rect` math throughout `ui.rs` so a two-column
+  `saturating_add` for ids, saturating `Rect` math throughout `ui/layout.rs` so a two-column
   terminal degrades instead of panicking.
 - `debug_assert!` is fine for a condition that is genuinely impossible, but pair it with a
   real fallback for release builds, the way `generate_with_rng` does with its empty

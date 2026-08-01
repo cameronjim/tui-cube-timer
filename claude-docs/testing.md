@@ -23,8 +23,10 @@ rule 1 support each other:
   ordinary function calls that run in microseconds.
 - **I/O** goes through one module with a path parameter. Point that parameter somewhere
   disposable and it is just a function again.
-- **Rendering** is the part that genuinely resists automated testing, so it is deliberately
-  left out. See below.
+- **Rendering** used to be the exception. It is now split: the geometry moved into
+  `ui/layout.rs`, which is pure arithmetic and tested like any other pure module, and what
+  remains in `ui/mod.rs` is driven through ratatui's `TestBackend`. What is asserted about
+  the resulting frame is still modest. See below.
 
 The general shape to aim for: if something is hard to test, that is usually a boundary
 problem, not a testing problem. Move the clock read, the file path or the event source out
@@ -38,19 +40,28 @@ test crate. Colocation buys access to private items, which matters here: `trim_c
 `average_window`, `is_legal`, `tmp_path` and the private fields of `App` are all tested
 directly.
 
-Current state, 114 tests, all green:
+Current state, 227 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
-| `app.rs` | 59 | State machine, keys, `/commands`, persistence side effects |
-| `stats.rs` | 31 | Trimmed averages, penalties, session stats, personal bests |
-| `storage.rs` | 16 | Round trips, atomic write, missing versus corrupt files, version migration |
-| `scramble.rs` | 8 | Move pools, lengths, the legality rule, determinism |
-| `types.rs` | 0 | Formatting is covered indirectly through `stats` and `app` |
-| `ui.rs` | 0 | Not covered on purpose |
+| `app.rs` | 71 | State machine, keys, `/commands`, sanitize, persistence side effects |
+| `stats.rs` | 32 | Trimmed averages, penalties, session stats, personal bests |
+| `storage.rs` | 24 | Round trips, atomic write, missing versus corrupt files, the size cap, both migrations |
+| `ui/layout.rs` | 16 | Panel heights, word wrap, the header cap, popup packing |
+| `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
+| `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
+| `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
+| `ui/mod.rs` | 9 | Render smoke at four sizes, one content anchor |
+| `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
+| `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
+| `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
+| `types.rs` | 7 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
+| `scramble/mod.rs` | 3 | Every puzzle dispatches, is non-empty and is seed-stable |
 
-`types.rs` having no test module of its own is a gap of convenience, not a policy. If you
-touch `format_millis` or `format_solve`, add one.
+The three tests in `scramble/mod.rs` are worth their line count out of proportion to their
+size: each loops over `Puzzle::ALL`, so adding a twelfth event without writing a generator
+for it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
+thing, rendering every puzzle at every size.
 
 ## Testing pure logic
 
@@ -78,19 +89,83 @@ Cover the boundaries, not just the happy path: exactly `n` solves, one fewer tha
 truncation that is not rounding. The `stats.rs` module is grouped by banner comments
 (`// ---- ao5`, `// ---- personal bests`) so a reader can see which areas have coverage.
 
-`scramble.rs` tests randomized output, so it drives `generate_with_rng` with a seeded
-`StdRng` and asserts properties rather than exact strings: the move count is exactly right
-for the puzzle, every move comes from the puzzle's pool, and the legality rule holds at every
-position across the whole sequence. Four hundred seeds per puzzle is cheap and catches rule
-violations that a single sample would miss. Determinism gets its own test (same seed, same
-scramble), and the `thread_rng` entry point gets a smaller well-formedness check. Two tests
-guard against the constraint drifting back to something stricter than TNoodle:
-`legality_predicate_rejects_illegal_sequences` pins `is_legal` down case by case, and
-`big_cubes_do_produce_runs_of_three_on_one_axis` asserts that same-axis runs longer than two
-really do come out of the generator.
-
 `storage.rs` tests the file layer against real files in the system temp directory, using an
-RAII guard so nothing survives the run.
+RAII guard so nothing survives the run. Migrations are tested from hand-written JSON string
+constants (`V1_FILE`, `V2_FILE`), never from struct literals, because a struct literal
+silently follows whatever the current shape is and would stop testing the old format the
+moment the new one lands. One test asserts that loading a version-2 file leaves the bytes on
+disk untouched, which is the property that makes a failed run non-destructive.
+
+### Seeded property tests, the house pattern for generators
+
+Every file under `scramble/` tests randomized output the same way, and the pattern is worth
+imitating for anything else that generates rather than computes.
+
+Drive the generator with a seeded `StdRng` and assert **properties, not exact strings**. A
+golden string breaks on any harmless change and tells you nothing about which rule was
+violated. A property test says which rule broke:
+
+```rust
+for seed in 0..400u64 {
+    let text = scramble(&mut StdRng::seed_from_u64(seed));
+    // ... assert every rule of the notation against `text`
+}
+```
+
+Four hundred seeds per puzzle runs in milliseconds and catches rule violations a single
+sample would miss. The supporting shape around it:
+
+- **A parser as the shared assertion.** Each file has a `parse` or `decode` helper that
+  splits a scramble into tokens and asserts the frame on the way through: single spaces, no
+  stray whitespace, the right token count, the right token in the right slot. Every test
+  then runs on structured output rather than re-parsing by hand, and every test inherits the
+  notation checks for free.
+- **Panic messages that name the offender.** Every assertion interpolates the scramble
+  (`"repeated layer in {scramble:?}"`). With 400 seeds a bare `assert!` tells you nothing.
+- **Coverage assertions, not just legality.** It is not enough that no rule is broken; the
+  generator also has to actually reach everything. `every_axis_and_both_directions_appear`,
+  `tip_counts_range_over_zero_through_four` and `every_ordered_pair_of_distinct_axes_occurs`
+  all exist to catch a generator that is legal and starved. The last one is the sharpest: it
+  counts every ordered axis pair over 600 seeds and fails if any legal pair is
+  disproportionately rare, which is what would happen if the skip-the-previous-index
+  arithmetic were subtly wrong.
+- **Statistical assertions with wide bands.** `a_tip_is_solved_roughly_one_time_in_three`
+  asserts a count falls in `950..1180` against an expectation of about 1067. Wide enough not
+  to be flaky, tight enough to catch a wrong model.
+- **Determinism gets its own test.** Same seed, same scramble; different seed, different
+  scramble.
+- **An official scramble as a fixture.** `pyraminx.rs` runs its `assert_well_formed` against
+  `OFFICIAL`, a scramble copied from a real TNoodle competition sheet. This proves the
+  assertions accept genuine WCA output and are not just a description of Cubetimer's own
+  quirks. Worth adding for any event where a real scramble is easy to come by.
+- **Guards against drift.** `legality_predicate_rejects_illegal_sequences` pins `is_legal`
+  down case by case and `big_cubes_do_produce_runs_of_three_on_one_axis` asserts same-axis
+  runs longer than two really do occur, which together stop the cube constraint from
+  quietly becoming stricter than TNoodle's again.
+
+### Replay verification
+
+`square1.rs` adds one more technique, and it is the strongest of the lot. The generator
+carries a shape simulator to decide which twists leave the puzzle slashable, so the tests
+**replay each generated scramble through that simulator from solved**, asserting at every
+step that the move is physically possible:
+
+```rust
+Token::Slash => {
+    assert!(shape.can_slash(), "slash at index {i} is blocked by a corner in {scramble:?}");
+    shape = shape.slashed();
+}
+```
+
+It also checks after every single move that the multiset of piece ids is unchanged, so a
+simulator bug that loses or duplicates a piece is caught the moment it happens rather than
+showing up as a mysterious legality failure later. The simulator itself is tested separately
+against known values: the solved array matches TNoodle's, a twist and its inverse return to
+solved, a twist of one moves the layer exactly one slot, and two slashes cancel.
+
+The general principle: **when the generator carries a model, make the tests replay against
+that model.** It turns "the output looks plausible" into "the output is provably turnable",
+and it is available to any generator that simulates rather than just samples.
 
 ## Testing the state machine
 
@@ -152,16 +227,39 @@ assert!(matches!(app.state, TimerState::Armed { .. }),
     "space Press must arm straight away by default, got {:?}", app.state);
 ```
 
-## What is deliberately not covered
+## Testing the renderer
 
-**`ui.rs` rendering.** No assertions are made about the drawn frame. Layout correctness is
-verified by eye, and the type system plus the module boundary carry the rest: `draw` takes
-`&App`, so it cannot change state, and every value it prints was already computed and tested
-in `app.rs` or `stats.rs`. The genuine rendering risk is panicking on a tiny terminal, and
-that is handled structurally rather than by test, with saturating arithmetic everywhere and
-no direct indexing into a `Rect`. Snapshot testing a `TestBackend` buffer is possible with
-ratatui, but the churn cost on a UI that is still moving is higher than the bug rate it
-would catch.
+Rendering used to be uncovered on purpose. It is not any more, and the split that made it
+testable is `ui/layout.rs`.
+
+**Geometry is unit-tested directly.** Every degradation rule is a pure function over `Rect`
+and `&str`, so it is asserted like any other pure code, with no terminal involved:
+`header_height` grows for a seven-line Megaminx scramble, stays at the minimum for a
+one-line one, never exceeds `HEADER_MAX_H`, degrades on a tiny terminal, and yields to the
+timer before it finishes growing. `wrapped_rows` is tested on word boundaries, on a word
+wider than the line, and at zero width. `inner_of` is tested to bottom out at zero rather
+than underflow. These are the assertions that used to be made by resizing a terminal and
+squinting.
+
+**Drawing is smoke-tested through `TestBackend`.** `render(app, w, h)` draws one frame into
+a ratatui `TestBackend` and returns every cell's symbol as a string. The tests sweep four
+sizes, `(80,30)`, `(44,12)`, `(30,8)` and `(10,4)`, over every puzzle, empty and populated,
+plus the help overlay, command mode, a status message, a 60-character session name, a solve
+over an hour, and a times scroll past the end of the list.
+
+Be clear about what that buys. For most of these, **not panicking is the assertion**. That
+is the genuine rendering risk and the sweep is a real guard against it, but it is not a
+claim that the frame looks right. One test,
+`a_normal_frame_actually_draws_its_chrome`, anchors the rest by asserting the buffer
+actually contains `cubetimer`, `3x3`, `stats` and `times`, so a `draw` that silently wrote
+nothing cannot pass the whole file. Beyond that anchor, content is not asserted.
+
+Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
+moving is higher than the bug rate it would catch, and the pieces where a wrong value would
+actually matter are computed and tested in `app.rs`, `stats.rs` and `ui/layout.rs` before
+the renderer ever sees them.
+
+## What is deliberately not covered
 
 **True end-to-end TUI automation.** Nothing spawns the real binary, drives a real terminal
 and reads back the rendered screen. Doing that on Windows means a ConPTY harness, and the
