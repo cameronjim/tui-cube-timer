@@ -1,4 +1,4 @@
-//! cubetimer — a speedcube timer TUI.
+//! cubetimer, a speedcube timer TUI.
 
 mod app;
 mod scramble;
@@ -26,8 +26,7 @@ const TICK: Duration = Duration::from_millis(15);
 fn main() {
     let path = storage::data_file_path();
 
-    // Startup load. A corrupt file must never be silently overwritten: bail out
-    // before the TUI starts so the message is actually readable.
+    // Bail out before the TUI starts so a corrupt save file is never overwritten.
     let save = match storage::load(&path) {
         Ok(save) => save,
         Err(e) => {
@@ -47,8 +46,7 @@ fn main() {
 
     let mut terminal = ratatui::init();
 
-    // Ask for key *release* events where the terminal supports the kitty
-    // keyboard protocol (no-op on Windows, which reports them natively).
+    // Ask for key release events where the kitty protocol is supported (Windows reports them natively).
     let enhanced = matches!(supports_keyboard_enhancement(), Ok(true))
         && io::stdout()
             .execute(PushKeyboardEnhancementFlags(

@@ -1,9 +1,4 @@
-//! JSON persistence for the save file.
-//!
-//! Layout decisions live here and nowhere else:
-//! * where the data file lives (`data_file_path`),
-//! * how it is read (`load` — a missing file is fine, a corrupt one is not),
-//! * how it is written (`save` — pretty JSON, written atomically).
+//! JSON persistence for the save file: where it lives, how it is read and atomically written.
 
 use crate::types::SaveFile;
 use std::ffi::OsString;
@@ -17,12 +12,7 @@ const DATA_ENV_VAR: &str = "CUBETIMER_DATA";
 /// File name used inside the platform data directory (and by the fallback).
 const DATA_FILE_NAME: &str = "sessions.json";
 
-/// Path of the JSON file holding all sessions.
-///
-/// Resolution order:
-/// 1. `CUBETIMER_DATA` (a full *file* path, not a directory),
-/// 2. the platform data dir from `directories::ProjectDirs` + `sessions.json`,
-/// 3. `./sessions.json` next to the current working directory.
+/// Sessions file path: `CUBETIMER_DATA` (a full file path), else the platform data dir, else `./sessions.json`.
 pub fn data_file_path() -> PathBuf {
     if let Some(from_env) = std::env::var_os(DATA_ENV_VAR) {
         if !from_env.is_empty() {
@@ -35,12 +25,7 @@ pub fn data_file_path() -> PathBuf {
     PathBuf::from("./sessions.json")
 }
 
-/// Read the save file.
-///
-/// A missing file is not an error — it just means "first run" — and yields
-/// `SaveFile::default()`. Anything that exists but cannot be parsed *is* an
-/// error, so the caller can bail out instead of overwriting real user data
-/// with a fresh default on the next save.
+/// Read the save file: missing yields the default (first run), unparsable is an error so data is never overwritten.
 pub fn load(path: &Path) -> io::Result<SaveFile> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
@@ -55,10 +40,7 @@ pub fn load(path: &Path) -> io::Result<SaveFile> {
     })
 }
 
-/// Write the save file as pretty-printed JSON, creating parent directories.
-///
-/// Atomic: the JSON goes to a sibling `<name>.tmp` first and is then renamed
-/// over the target, so an interrupted write can never truncate the real file.
+/// Write pretty JSON atomically via a sibling `<name>.tmp` + rename, creating parent dirs.
 pub fn save(path: &Path, data: &SaveFile) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -324,8 +306,7 @@ mod tests {
 
     #[test]
     fn data_file_path_is_usable() {
-        // Deliberately does not assert a specific location: CUBETIMER_DATA may be
-        // set in the ambient environment, and tests must not touch the real dir.
+        // No specific location asserted: CUBETIMER_DATA may be set in the environment.
         let p = data_file_path();
         assert!(!p.as_os_str().is_empty());
         assert!(p.file_name().is_some());

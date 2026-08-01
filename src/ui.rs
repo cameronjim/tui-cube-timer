@@ -1,12 +1,4 @@
-//! All rendering for the cubetimer TUI.
-//!
-//! The single entry point is [`draw`]. Everything here is read-only with respect to
-//! [`App`]: every value that would require `Instant` math has already been folded into
-//! `app.display_millis` / `app.inspection_remaining` by `App::on_tick`.
-//!
-//! Rendering is defensive about terminal size: all arithmetic is saturating, no `Rect`
-//! is indexed into, and panels degrade (drop the side column, drop the stats strip,
-//! fall back from block digits to plain text) rather than panic on tiny terminals.
+//! All rendering (entry point [`draw`]), read-only over [`App`] and saturating throughout so tiny terminals degrade instead of panicking.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,9 +10,7 @@ use crate::app::{App, InputMode, TimerState};
 use crate::stats::{self, PersonalBests, SessionStats};
 use crate::types::{format_millis, format_solve, Penalty, Puzzle, Session};
 
-// ---------------------------------------------------------------------------
-// palette
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------- palette
 
 const C_IDLE: Color = Color::White;
 const C_INSPECT: Color = Color::Yellow;
@@ -58,9 +48,7 @@ fn inner_of(area: Rect) -> Rect {
     }
 }
 
-// ---------------------------------------------------------------------------
-// entry point
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------ entry point
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -68,8 +56,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
 
-    // Header (scramble) / body / status line. On very short terminals the body
-    // constraint collapses to zero rows and ratatui simply clips.
+    // Header / body / status; on short terminals the body collapses to zero rows and clips.
     let header_h = if area.height >= 9 { 4 } else { 3 };
     let footer_h = if area.height >= 6 { 3 } else { 0 };
     let rows = Layout::default()
@@ -92,9 +79,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// header: title + scramble
-// ---------------------------------------------------------------------------
+// ------------------------------------------------- header: title + scramble
 
 fn draw_scramble(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -126,9 +111,7 @@ fn draw_scramble(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-// ---------------------------------------------------------------------------
-// body: timer + stats on the left, times list on the right
-// ---------------------------------------------------------------------------
+// ------------------------ body: timer + stats left, times list right
 
 fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -165,24 +148,20 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// big timer
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------- big timer
 
-/// What the big area should show right now: the glyph string, its colour, and an
-/// optional red sub-caption (inspection penalty) plus a dim state caption.
+/// What the big area shows now: glyph string, colour, optional penalty caption, state caption.
 fn timer_view(app: &App) -> (String, Color, Option<String>, &'static str) {
     match app.state {
         TimerState::Idle => (
             format_millis(app.display_millis),
             C_IDLE,
             None,
-            "ready — hold space",
+            "ready, hold space",
         ),
         TimerState::Inspecting { .. } => {
             let remaining = app.inspection_remaining.unwrap_or(15);
-            // Past 15s -> +2, past 17s -> DNF. `remaining` counts 15..0 and then
-            // goes negative, so 0 or less means the 15s limit is gone.
+            // `remaining` counts 15..0 then negative: <= 0 is past 15s (+2), <= -2 is past 17s (DNF).
             let (penalty, color) = if remaining <= -2 {
                 (Some("DNF".to_string()), Color::Red)
             } else if remaining <= 0 {
@@ -214,7 +193,7 @@ fn timer_view(app: &App) -> (String, Color, Option<String>, &'static str) {
             format_millis(app.display_millis),
             C_TIMING,
             None,
-            "solving — any key stops",
+            "solving, any key stops",
         ),
     }
 }
@@ -274,14 +253,11 @@ fn draw_timer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, inner);
 }
 
-// ---------------------------------------------------------------------------
-// 5-row block font
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------- 5-row block font
 
 const GLYPH_H: usize = 5;
 
-/// Rows of a single glyph. Unknown characters render as a blank cell so that a
-/// surprising input string can never panic or mis-align the rows.
+/// Rows of one glyph; unknown chars render blank so odd input can never mis-align rows.
 fn glyph(c: char) -> [&'static str; GLYPH_H] {
     match c {
         '0' => ["████", "█  █", "█  █", "█  █", "████"],
@@ -317,9 +293,7 @@ fn big_text(s: &str) -> Vec<String> {
     rows
 }
 
-// ---------------------------------------------------------------------------
-// stats + personal bests
-// ---------------------------------------------------------------------------
+// ------------------------------------------------- stats + personal bests
 
 fn opt_time(v: Option<u64>) -> String {
     v.map(format_millis).unwrap_or_else(|| "-".to_string())
@@ -381,9 +355,7 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-// ---------------------------------------------------------------------------
-// times list (newest first, scrollable)
-// ---------------------------------------------------------------------------
+// ------------------------------------- times list (newest first, scrollable)
 
 fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -443,9 +415,7 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-// ---------------------------------------------------------------------------
-// bottom line: command buffer / status / hints
-// ---------------------------------------------------------------------------
+// --------------------------- bottom line: command buffer / status / hints
 
 const HINT: &str =
     "space hold+release: start · /: commands · n: new scramble · h: help · q: quit";
@@ -476,9 +446,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-// ---------------------------------------------------------------------------
-// help overlay
-// ---------------------------------------------------------------------------
+// ----------------------------------------------------------- help overlay
 
 /// A centered rect of at most `w` x `h`, always inside `area`.
 fn centered(w: u16, h: u16, area: Rect) -> Rect {
