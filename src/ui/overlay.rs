@@ -1,4 +1,4 @@
-//! The three popups drawn over the frame: the key and command reference, the session list,
+//! The three popups drawn over the frame: the key and command reference, the session picker,
 //! and one solve in full.
 //!
 //! All are read-only over [`App`] like the rest of [`ui`](super), and all clamp themselves
@@ -11,7 +11,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::layout::{
-    centered, detail_popup, puzzle_help_rows, sessions_popup, HELP_KEY_W, HELP_W, SESSIONS_NAME_W,
+    centered, detail_popup, list_window, puzzle_help_rows, sessions_popup, HELP_KEY_W, HELP_W,
+    SESSIONS_NAME_W,
 };
 use super::{dim, C_ACCENT, C_IDLE, C_INSPECT, C_TIMING, C_WORST};
 use crate::app::App;
@@ -116,19 +117,25 @@ fn clip(name: &str, width: usize) -> String {
     out
 }
 
-/// Every session in one popup: id, name, puzzle and solve count, the active one highlighted.
+/// Every session in one popup: id, name, puzzle and solve count, under a moving cursor.
 ///
-/// Stateless like the rest of [`ui`](super), so there is no scroll offset: a list taller than
-/// the popup shows what fits and counts the rest on a final row.
-pub(super) fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
+/// `cursor` indexes `app.save.sessions` in the order they are drawn and is clamped rather than
+/// trusted. The two states a row can be in are deliberately different marks: the active session
+/// keeps the `>` in the marker column, the cursor reverses its whole row, and the row that is
+/// both reads as a reversed row with a marker on it. A list taller than the popup scrolls under
+/// the cursor, and the title counts the position so the rows outside the window are accounted for.
+pub(super) fn draw_sessions(frame: &mut Frame, app: &App, cursor: usize, area: Rect) {
     let sessions = &app.save.sessions;
-    let (popup, shown) = sessions_popup(sessions.len(), area);
+    let total = sessions.len();
+    let (popup, rows) = sessions_popup(total, area);
     if popup.width < 4 || popup.height < 4 {
         return;
     }
+    let cursor = cursor.min(total.saturating_sub(1));
+    let (start, len) = list_window(cursor, total, rows);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(shown.saturating_add(1));
-    for session in sessions.iter().take(shown) {
+    let mut lines: Vec<Line> = Vec::with_capacity(len.saturating_add(1));
+    for (offset, session) in sessions.iter().skip(start).take(len).enumerate() {
         // Twelve of these are named `default`, so dimming that name is what makes the
         // sessions someone made themselves findable in the list.
         let name_style = if session.is_default() {
@@ -137,11 +144,14 @@ pub(super) fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(C_IDLE)
         };
         let active = session.id == app.save.active_session_id;
+        let marker_style = if active {
+            Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
         let line = Line::from(vec![
-            Span::styled(
-                format!("{}{:>3}  ", if active { '>' } else { ' ' }, session.id),
-                dim(),
-            ),
+            Span::styled(if active { ">" } else { " " }, marker_style),
+            Span::styled(format!("{:>3}  ", session.id), dim()),
             Span::styled(clip(&session.name, SESSIONS_NAME_W), name_style),
             Span::styled(
                 format!(" {:<8} ", session.puzzle.name()),
@@ -150,22 +160,24 @@ pub(super) fn draw_sessions(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("[{}]", session.solves.len()), dim()),
         ]);
         // Reversed rather than recoloured, so the dim default names still read on it.
-        lines.push(if active {
+        lines.push(if start + offset == cursor {
             line.patch_style(Style::default().add_modifier(Modifier::REVERSED))
         } else {
             line
         });
     }
 
-    let hidden = sessions.len().saturating_sub(shown);
-    lines.push(if hidden > 0 {
-        Line::styled(format!("  +{} more", hidden), dim())
+    lines.push(Line::styled("  enter: switch   esc: close", dim()));
+
+    // The position stands in for the rows the window left out, and only appears when it did.
+    let title = if len < total {
+        format!(" sessions {}/{} ", cursor.saturating_add(1), total)
     } else {
-        Line::styled("  esc: close", dim())
-    });
+        " sessions ".to_string()
+    };
 
     frame.render_widget(Clear, popup);
-    let p = Paragraph::new(Text::from(lines)).block(popup_block(" sessions ".to_string()));
+    let p = Paragraph::new(Text::from(lines)).block(popup_block(title));
     frame.render_widget(p, popup);
 }
 
@@ -226,10 +238,21 @@ pub(super) fn draw_detail(frame: &mut Frame, app: &App, index: usize, area: Rect
 
 #[cfg(test)]
 mod tests {
-    use super::super::testkit::{app_with, mega, render, render_all, render_buffer};
+    use super::super::testkit::{
+        app_with, mega, render, render_all, render_buffer, row_cells, row_with,
+    };
     use crate::app::{App, TimerState};
     use crate::types::{Puzzle, Session, FIRST_USER_ID};
+    use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
+
+    /// Cells of row `y` drawn reversed, which is how the cursor marks the row it is on.
+    fn reversed_in(buffer: &Buffer, y: usize) -> usize {
+        row_cells(buffer, y)
+            .iter()
+            .filter(|c| c.modifier.contains(Modifier::REVERSED))
+            .count()
+    }
 
     /// Add sessions of your own on top of the twelve permanent defaults.
     fn with_user_sessions(app: &mut App, names: &[&str]) {
@@ -310,12 +333,16 @@ mod tests {
     fn the_sessions_overlay_lists_every_session_at_every_size() {
         let mut app = app_with(Puzzle::Cube3, 5);
         with_user_sessions(&mut app, &["morning", "evening", "one-handed drills, sub-20 push"]);
-        app.show_sessions = true;
+        app.sessions_overlay = Some(0);
         render_all(&app);
 
         let buffer = render_buffer(&app, 80, 30);
         let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains(" sessions "), "the popup is titled");
+        assert!(
+            !text.contains("sessions 1/15"),
+            "the title counts the position only when a row was left out"
+        );
         assert!(
             text.contains(">  1  default"),
             "the active session carries the marker"
@@ -329,14 +356,9 @@ mod tests {
             "a name past the column ends in an ellipsis"
         );
         assert!(text.contains("megaminx"), "every default is listed too");
-        // The hint has the last row only when the whole list was drawn above it.
-        assert!(text.contains("esc: close"), "nothing was left out at this size");
         assert!(
-            buffer
-                .content()
-                .iter()
-                .any(|c| c.modifier.contains(Modifier::REVERSED)),
-            "the active row is highlighted"
+            text.contains("enter: switch   esc: close"),
+            "the hint names both keys the overlay answers to"
         );
 
         // A small terminal clamps the popup instead of panicking or hiding it.
@@ -344,22 +366,77 @@ mod tests {
     }
 
     #[test]
-    fn a_sessions_list_taller_than_the_popup_counts_what_it_dropped() {
+    fn the_cursor_reverses_its_row_and_the_active_session_keeps_its_marker() {
+        let mut app = app_with(Puzzle::Cube3, 5);
+        with_user_sessions(&mut app, &["morning", "evening", "night"]);
+
+        // On the active session the two marks stack: a reversed row with the marker on it.
+        app.sessions_overlay = Some(0);
+        let buffer = render_buffer(&app, 80, 30);
+        let active = row_with(&buffer, ">  1  default");
+        assert!(
+            reversed_in(&buffer, active) > 0,
+            "the cursor reverses the row it sits on"
+        );
+
+        // Away from it the marker is the only thing saying which session is live.
+        app.sessions_overlay = Some(12);
+        let buffer = render_buffer(&app, 80, 30);
+        let active = row_with(&buffer, ">  1  default");
+        let cursor = row_with(&buffer, "morning");
+        assert_ne!(active, cursor, "the two rows are different rows");
+        assert_eq!(
+            reversed_in(&buffer, active),
+            0,
+            "the active row is not the cursor row"
+        );
+        assert!(
+            reversed_in(&buffer, cursor) > 0,
+            "the cursor took its own row with it"
+        );
+        assert_eq!(
+            reversed_in(&buffer, row_with(&buffer, "evening")),
+            0,
+            "and no other session row is reversed"
+        );
+    }
+
+    #[test]
+    fn a_sessions_list_taller_than_the_popup_scrolls_under_the_cursor() {
         let mut app = app_with(Puzzle::Cube3, 1);
         with_user_sessions(&mut app, &["morning", "evening", "night"]);
-        app.show_sessions = true;
 
-        // Ten rows leaves eight inside the border: seven sessions and the count of the rest.
+        // Ten rows leaves eight inside the border: seven sessions and the hint.
+        app.sessions_overlay = Some(0);
         let text = render(&app, 80, 10);
-        assert!(text.contains("+8 more"), "the eight it could not draw are counted");
-        assert!(!text.contains("esc: close"), "the hint gives its row up first");
-        assert!(text.contains(">  1  default"), "the active row is still drawn");
+        assert!(
+            text.contains(" sessions 1/15 "),
+            "the title counts the rows outside the window"
+        );
+        assert!(text.contains(">  1  default"), "the window opens on the top");
+        assert!(!text.contains("morning"), "and the end of the list is not in it");
+        assert!(text.contains("enter: switch"), "the hint keeps its row");
+
+        // The cursor at the far end pulls the window with it.
+        app.sessions_overlay = Some(14);
+        let buffer = render_buffer(&app, 80, 10);
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains(" sessions 15/15 "));
+        for name in ["morning", "evening", "night"] {
+            assert!(text.contains(name), "the window is missing {:?}", name);
+        }
+        assert!(reversed_in(&buffer, row_with(&buffer, "night")) > 0);
+
+        // A cursor past the end of the list is clamped, not trusted.
+        app.sessions_overlay = Some(usize::MAX);
+        assert!(render(&app, 80, 10).contains(" sessions 15/15 "));
+        render_all(&app);
     }
 
     #[test]
     fn the_solve_detail_overlay_wins_over_the_sessions_overlay() {
         let mut app = app_with(Puzzle::Cube3, 3);
-        app.show_sessions = true;
+        app.sessions_overlay = Some(0);
         app.solve_detail = Some(0);
         let text = render(&app, 80, 40);
         assert!(text.contains("r: load scramble"), "the detail popup is drawn");

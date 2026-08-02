@@ -141,10 +141,20 @@ impl App {
     }
 
     /// Open the sessions overlay. The listing outgrew the one-line status bar at twelve
-    /// permanent defaults, so it is a popup and `ui` does the formatting.
+    /// permanent defaults, so it is a popup you pick from and `ui` does the formatting.
     fn cmd_list_sessions(&mut self) {
-        self.show_sessions = true;
-        self.show_help = false;
+        self.open_sessions_overlay();
+    }
+
+    /// Activate a session that is known to exist. The sessions overlay shares this path.
+    pub(super) fn switch_to_session(&mut self, id: u64) {
+        self.save.active_session_id = id;
+        self.new_scramble();
+        self.refresh_derived();
+        let s = self.current_session();
+        let msg = format!("session: {} ({})", s.name, s.puzzle.name());
+        self.status(msg);
+        self.save_now();
     }
 
     fn cmd_switch_session(&mut self, rest: &str) {
@@ -163,13 +173,7 @@ impl App {
             self.status(format!("no session with id {}", id));
             return;
         }
-        self.save.active_session_id = id;
-        self.new_scramble();
-        self.refresh_derived();
-        let s = self.current_session();
-        let msg = format!("session: {} ({})", s.name, s.puzzle.name());
-        self.status(msg);
-        self.save_now();
+        self.switch_to_session(id);
     }
 
     fn cmd_rename(&mut self, rest: &str) {
@@ -745,7 +749,11 @@ mod tests {
         run_command(&mut app, "new second");
 
         run_command(&mut app, "sessions");
-        assert!(app.show_sessions, "the listing is a popup now");
+        assert_eq!(
+            app.sessions_overlay,
+            Some(Puzzle::DEFAULT_ORDER.len()),
+            "the listing is a popup now, opened on the session you are in"
+        );
         assert!(
             app.status_msg.is_none(),
             "twelve defaults do not fit on one line, so nothing goes there: {:?}",
@@ -765,17 +773,18 @@ mod tests {
         assert!(app.show_help);
 
         run_command(&mut app, "sessions");
-        assert!(app.show_sessions, "/sessions opens the listing");
+        assert!(app.sessions_overlay.is_some(), "/sessions opens the listing");
         assert!(!app.show_help, "and closes the help");
 
+        // The listing is modal, so it is closed before the help can come back.
+        app.on_key(press(KeyCode::Esc));
         run_command(&mut app, "help");
         assert!(app.show_help, "/help opens the help");
-        assert!(!app.show_sessions, "and closes the listing");
+        assert_eq!(app.sessions_overlay, None, "and the listing stays closed");
 
-        // Toggling the help back off leaves the listing closed rather than restoring it.
         run_command(&mut app, "help");
         assert!(!app.show_help);
-        assert!(!app.show_sessions);
+        assert_eq!(app.sessions_overlay, None);
     }
 
     #[test]

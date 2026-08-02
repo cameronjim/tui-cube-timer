@@ -81,16 +81,17 @@ release exactly as before to start the solve. `Esc` backs out of a countdown if
 you change your mind.
 
 A judge at a competition calls out "8 seconds" and "12 seconds" while you
-inspect, and Cubetimer does the same. At 8 seconds the countdown turns light
-magenta and the terminal bell rings once; at 12 seconds it turns light red and
-rings again. Each call sounds once per inspection, so you can learn the rhythm
-without watching the number.
+inspect, and Cubetimer marks both silently. At 8 seconds the countdown turns
+light magenta and `8s` appears in the small line under the digits; at 12 seconds
+it turns light red and that line reads `12s`. The colour is the part you catch
+without looking away from the cube, and the caption is there when you do look.
 
 The penalties are applied for you, so there is nothing to remember afterwards.
 Going past 15 seconds turns the solve into a +2, and going past 17 seconds makes
-it a DNF. Either way the timer shows what you have earned in red while the
-countdown is still on screen, and the solve is recorded with that penalty
-already attached.
+it a DNF. Either way the countdown turns red and the same small line switches
+from the judge call to `+2` or `DNF`, so a penalty you have already earned is
+never mistaken for a call, and the solve is recorded with that penalty already
+attached.
 
 ## Looking back at a solve
 
@@ -124,6 +125,7 @@ back. Like inspection, the setting is remembered between runs.
 | `Home` | jump the times-list selection back to your newest solve |
 | `Enter` | open the selected solve in full; `r` inside loads its scramble |
 | `h` or `?` | open and close the help overlay |
+| arrows, `PgUp` `PgDn`, `Home` | inside `/sessions`, move the cursor; `Enter` switches |
 | `Esc` | cancel inspection, close a popup, leave the command line, clear the status line |
 | `q` | quit |
 
@@ -141,7 +143,7 @@ spaces do not matter.
 | `/pyraminx` `/skewb` `/megaminx` `/sq1` `/clock` | the same, for the five non-cube events |
 | `/oh` | the same, for 3x3 one-handed |
 | `/new [name]` | start a new session for the current puzzle |
-| `/sessions` | open a popup listing every session with its id, puzzle and solve count |
+| `/sessions` | open a picker listing every session with its id, puzzle and solve count |
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
 | `/delsession [id]` | delete a session and its solves, current one by default |
@@ -183,10 +185,18 @@ themselves cannot be renamed, retyped or deleted, so `/4x4` always has somewhere
 to land. `/new` gives you as many sessions of your own as you want, with ids
 from 13 up, and without a name they are numbered for you.
 
-`/sessions` shows the lot in a popup, one row each, with the session you are in
-highlighted and the twelve `default` names dimmed so your own stand out. `Esc`
-closes it. On a terminal too short to hold every row, the ones that did not fit
-are counted on the last line.
+`/sessions` shows the lot in a popup you pick from, one row each, with the
+twelve `default` names dimmed so your own stand out and a `>` beside the session
+you are in. The cursor starts on that row. The arrow keys and `k` `j` move it one
+row at a time, `PgUp` and `PgDn` ten, and `Home` goes to the top; `Enter`
+switches to the session under the cursor and closes the popup, and `Esc` closes
+it without changing anything. Choosing the session you are already in is a no-op,
+so the scramble in front of you survives.
+
+Nothing behind the popup responds while it is open, not even the space bar, so
+there is no way to start a solve by accident while you are choosing. On a
+terminal too short to hold every row the list scrolls under the cursor, and the
+title counts your position, as in `sessions 14/20`.
 
 A save file written by an older Cubetimer is brought up to this layout when it
 is read, however far back it came from. The old `default` session keeps its
@@ -251,9 +261,12 @@ A `+2` adds two seconds to the raw time, and everything downstream uses that
 penalised time. Times are truncated to centiseconds rather than rounded, WCA
 style, so 12.349 shows as `12.34`.
 
-The stats strip reads in three rows: your rolling `mo3 ao5 ao12 ao100 ao1000`,
-then `best worst mean solves` for the session you are in, then your personal
-bests. The `best`, `worst` and `mean` figures cover the current session only and
+The stats strip reads in three rows, and the first and last say which is which:
+`now` labels your rolling `mo3 ao5 ao12 ao100 ao1000`, the middle row is
+`best worst mean solves` for the session you are in, and `pb` labels your
+personal bests underneath. The middle row is unlabelled but still indented to the
+same column, so the three line up and a rolling average sits directly above the
+best you have ever done of it. The `best`, `worst` and `mean` figures cover the current session only and
 ignore DNFs. The personal bests are wider: PB single, mo3, ao5, ao12, ao100 and
 ao1000 are the best you have ever done across every session of the puzzle you
 are currently on, and the rolling windows behind them are searched within each

@@ -675,7 +675,7 @@ is checked first, an inspection that runs past 17 seconds is a DNF and never a `
 matter how long the cuber then stares at the cube.
 
 `inspection_remaining` is a separate, purely cosmetic value: `15 - floor(elapsed / 1000)`,
-counting down 15, 14, 13 and then going negative. `ui::timer_view` maps it to the on-screen
+counting down 15, 14, 13 and then going negative. `ui::timer::timer_view` maps it to the on-screen
 warning, showing `+2` in red once `remaining <= 0` and `DNF` once `remaining <= -2`. That
 second-granularity mapping is an approximation of the authoritative millisecond rule above
 and differs from it in a one-millisecond sliver at each boundary: at exactly 15,000 ms the
@@ -696,41 +696,40 @@ reproduces them from the same `elapsed` it uses for the penalties:
 const INSPECTION_CALL_8_MS: u128 = 8_000;
 const INSPECTION_CALL_12_MS: u128 = 12_000;
 
-let stage = if elapsed >= INSPECTION_CALL_12_MS {
+// The judge calls are silent: `ui` reads the stage for the countdown's colour and caption.
+self.inspection_stage = if elapsed >= INSPECTION_CALL_12_MS {
     2
 } else if elapsed >= INSPECTION_CALL_8_MS {
     1
 } else {
     0
 };
-if stage > self.inspection_stage {
-    self.inspection_stage = stage;
-    self.bell_pending = true;
-}
 ```
 
-Three properties are worth naming.
+Two properties are worth naming.
 
 **The comparisons are inclusive**, unlike the strictly-greater penalty thresholds above. A
 call announces that a mark has been reached, so it belongs at 8,000 ms exactly; a penalty
 punishes overrunning one, so it belongs strictly after. The asymmetry is deliberate.
 
-**The stage is the record of what has already sounded.** `stage > self.inspection_stage` is
-the entire guard, so each threshold rings exactly once per inspection however many of the
-15 ms ticks land past it, and the stage only ever climbs. It is reset to 0 by
-`start_inspection`, `cancel_inspection`, `start_timing` and `finish_solve`, which is what
-makes "once per inspection" true rather than "once per run".
+**The stage is assigned, not accumulated.** It is a function of `elapsed` and nothing else,
+so a tick recomputes it rather than advancing it, and there is no bookkeeping about which
+calls have already happened. That is only sound because the calls are silent: the stage
+feeds a colour and a caption, both of which are redrawn every frame anyway, so re-deriving
+the same value 66 times a second costs nothing and cannot get out of step with the clock.
+`start_inspection`, `cancel_inspection`, `start_timing` and `finish_solve` set it back to 0,
+which is what keeps the calls scoped to the inspection that earned them.
 
-**One field drives both outputs.** `ui::timer_view` matches on `inspection_stage` for the
-countdown colour, yellow at 0, light magenta at 1, light red at 2, and `main.rs` drains
-`bell_pending` through `App::take_bell` to write a BEL. Deriving the colour from the same
-value that queued the bell is what stops the two from disagreeing about when a call
-happened. The audible half is `main.rs`'s job because `App` does no I/O; see
-[architecture.md](architecture.md).
+`ui::timer::timer_view` matches on `inspection_stage` once, and that single match yields
+both the countdown colour, yellow at 0, light magenta at 1, light red at 2, and the caption
+in the small line under the digits, nothing at 0, `8s` at 1 and `12s` at 2. Deriving both
+from one value is what stops the colour and the text from disagreeing about which call is
+current.
 
-The penalty display still wins over the stage colour. Once `inspection_remaining` reaches 0
-or below, `timer_view` paints the countdown plain red and adds the `+2` or `DNF` caption,
-so an earned penalty is never mistaken for a judge call that only warns.
+The penalty display still wins over the stage. Once `inspection_remaining` reaches 0 or
+below, `timer_view` paints the countdown plain red and puts `+2` or `DNF` in the caption
+slot instead of the call, so an earned penalty is never mistaken for a warning that has cost
+nothing yet.
 
 ---
 

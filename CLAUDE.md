@@ -44,10 +44,12 @@ Three of those are directories, each split along its own internal seam:
 |---|---|
 | `app/mod.rs` | Timer state machine, key handling, tick, the derived fields the UI reads |
 | `app/commands.rs` | Command mode: the `/command` parser and every `cmd_*` handler |
+| `app/selection.rs` | Selection state: the times cursor, the solve-detail overlay, the sessions picker |
 | `app/repair.rs` | Save-file structural repair: `sanitize` and the id bookkeeping under it |
-| `app/testkit.rs` | Test scaffolding shared by the three, `#[cfg(test)]` only |
-| `ui/mod.rs` | `draw`, the panel renderers and the block font |
-| `ui/overlay.rs` | The three popups: help, the session list, and one solve in full |
+| `app/testkit.rs` | Test scaffolding shared by the four, `#[cfg(test)]` only |
+| `ui/mod.rs` | `draw`, the header, the stats strip, the times list and the status line |
+| `ui/timer.rs` | The big countdown: `timer_view`, `draw_timer` and the block font |
+| `ui/overlay.rs` | The three popups: help, the session picker, and one solve in full |
 | `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
 | `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
 | `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |
@@ -57,15 +59,17 @@ No module reaches around another's API. `ui` reads `App` fields and never touche
 because recomputing them in the 15 ms draw loop can hang on a large save file). `app` is
 the only caller of `storage::save`. Nothing outside `storage.rs` decides where data lives.
 `App`'s public surface is the whole of `app`: `crate::app::App` keeps every path it had
-before the directory split, and `main.rs` and `ui` are unaware there are three files.
+before the directory split, and `main.rs` and `ui` are unaware there is more than one file
+behind it.
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
-rather than appending. `app/mod.rs` (about 510) and `ui/mod.rs` (about 517) both sit just
-over the line. The next seam in `app/mod.rs` is the times-list cursor and the solve-detail
-overlay handlers (`select_newer`, `select_older`, `open_solve_detail`,
-`on_key_solve_detail`, `recall_scramble`), which are selection state rather than timer
-state. The next seam in `ui/mod.rs` is the big timer: `timer_view`, `draw_timer` and the
-`GLYPH_H` block font. Neither is urgent; treat further growth in either file as the prompt.
+rather than appending. Nothing in `src/` is over the line. The largest are `app/mod.rs` at
+475 non-test lines and `ui/mod.rs` at 367, and below them `storage.rs` at 345 and
+`app/commands.rs` at 303; none of the four has an obvious seam left, so treat growth past
+roughly 500 in any of them as the prompt to look for one. `app/selection.rs` and
+`ui/timer.rs` are the two most recent cuts and they show the shape to aim for: the parent
+keeps one entry point per cluster (`on_key_times`, `draw_timer`) and the child keeps every
+constant and helper behind it.
 
 **3. Comments are single-line, always.** Never `/* */` blocks. Use `///` doc comments on
 items and `//!` at the top of a module, first letter capitalized. Use sparse `//` inline
