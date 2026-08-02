@@ -1,7 +1,7 @@
 # Cubetimer architecture
 
 Cubetimer is a speedcube timer that lives entirely in the terminal. It is a single Rust
-binary crate (`cubetimer`) built on ratatui 0.29 and its bundled crossterm backend. This
+binary crate (`cubetimer`) built on ratatui 0.30 and its bundled crossterm backend. This
 document explains how the program is put together: what each module owns, how a frame
 gets on screen, how key events become timer transitions, and how solves reach disk.
 
@@ -61,7 +61,7 @@ is what makes the degradation rules testable as ordinary functions rather than b
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 450 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 465 |
 | `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
 | `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 240 |
 | `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 268 |
@@ -890,11 +890,11 @@ panic and without a blank screen:
   0 and it is not drawn at all.
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
-- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 6
-  rows once it has at least 13, the extra one being the trend sparkline. `stats_height` is
+- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 7
+  rows once it has at least 14, the extra two being the trend sparkline. `stats_height` is
   the whole of that decision and `trend_rows` is the conditional half of it: the strip
   appears at `STATS_H` (5) once `STATS_H + TIMER_MIN_H` fits, and the sparkline adds
-  `TREND_H` (1) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
+  `TREND_H` (2) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
   are written against `TIMER_MIN_H`, so the bars can never be the reason the block font is
   lost, and every terminal too short for them renders exactly what it did before the trend
   existed. An empty trend claims no rows at all.
@@ -920,22 +920,31 @@ panic and without a blank screen:
   `best single 9.87` is wide enough that the paragraph clips it, which is the intended
   degradation: a clipped number still says more than a blank row.
 
-  `draw_trend` takes the row below and spends the same `STAT_PREFIX_W` plus a space on a
-  dim `trend` label, so the bars begin in the column the three rows put their values in.
-  What it plots is `App::trend`, tail-sliced to the width it was given, because a panel too
-  narrow for fifty bars should drop the oldest solves rather than the ones just done. The
-  bars are times, so a dip is a fast solve. A panel with no room for anything past the
-  label draws neither.
+  `draw_trend` takes the two rows below and spends the same `STAT_PREFIX_W` plus a space on
+  a dim `trend` label in the first of them, so the bars begin in the column the three rows
+  put their values in. What it plots is `App::trend`, tail-sliced to the width it was given,
+  because a panel too narrow for fifty bars should drop the oldest solves rather than the
+  ones just done. The bars are times, so a dip is a fast solve. A panel with no room for
+  anything past the label draws neither.
 
-  Two details keep that row readable, and both are about how ratatui draws a bar. It splits
-  each bar across every row of the area it is handed, so a two-row sparkline fills its
-  bottom row and scatters fragments through the top one wherever a bar passes half height,
-  which is why `TREND_H` is 1 and why `draw_trend` clamps the rect it renders into rather
-  than trusting the block to be the height it asked for. It also scales each bar against
-  the tallest value in the window and rounds down, so in a single row a solve under an
-  eighth of the slowest one lands on the empty symbol and puts a hole in the middle of the
-  line; `trend_bars` lifts those to the floor of one eighth first, and everything above the
-  floor stays proportional to the time it took.
+  Two details decide what that block looks like. The first is the glyph set. Ratatui's
+  default `NINE_LEVELS` bars are the eighth blocks `▁` through `█`, and the classic Windows
+  console fonts carry none of the partial ones, so on the platform Cubetimer targets first
+  the whole sparkline came out as tofu boxes. `draw_trend` asks for the `THREE_LEVELS` set
+  instead, whose only glyphs are a space, `▄` (U+2584) and `█` (U+2588), both of them CP437
+  characters every console font has. The second is that ratatui fills a bar
+  column from its bottom row upwards, so two rows of a three-level bar stack into exactly
+  four non-empty heights: `▄`, `█`, `▄` over `█`, and `█` over `█`. That is what `TREND_H`
+  is 2 for, and `draw_trend` still clamps the rect it renders into rather than trusting the
+  block to be the height it asked for.
+
+  `trend_bars` therefore hands the widget levels rather than milliseconds, normalized to
+  the window's own minimum and maximum, with `Sparkline::max(TREND_LEVELS)` set so a level
+  maps one to one onto a glyph stack instead of being rescaled again. The formula and the
+  reason for it are in [algorithms.md](algorithms.md); the short version is that solve times
+  cluster far from zero, and scaling from zero drew every bar at the same height. Level 1 is
+  the floor, so no solve leaves a blank column and the bottom row is unbroken across the
+  whole window.
 - **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold

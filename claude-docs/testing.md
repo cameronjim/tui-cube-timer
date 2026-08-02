@@ -61,7 +61,7 @@ Current state, 370 tests, all green:
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
 | `cstimer.rs` | 16 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
-| `ui/mod.rs` | 15 | Render smoke at four sizes, the chrome anchor, the stats prefix column, the trend sparkline |
+| `ui/mod.rs` | 19 | Render smoke at four sizes, the chrome anchor, the stats prefix column, the trend sparkline |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
 | `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
@@ -285,7 +285,7 @@ assert that stage 1 recolours the countdown *and* draws `8s` in that same colour
 `+2` takes the slot and the red back off it, and that a personal-best banner turns the
 digits under it light green while a running inspection is left alone; `rows_of` lets
 `ui/mod.rs` assert the three stats rows start their values in the same column and that the
-sparkline's bars begin in that same column, one row under them. Colour and column alignment
+sparkline's bars begin in that same column, on the two rows under them. Colour and column alignment
 carry meaning here, so they are asserted directly. Beyond those, content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
