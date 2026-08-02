@@ -16,7 +16,8 @@ Read this file first, then the guide you need:
 | `claude-docs/algorithms.md` | Scramble generation, WCA averages, penalty rules |
 | `claude-docs/code-style.md` | Comments, module boundaries, naming, error handling |
 | `claude-docs/testing.md` | What to test, how to test it, the bar for "done" |
-| `README.md` | User-facing behavior: keys, commands, where data lives |
+| `README.md` | The front door: what Cubetimer is, quick start, the keys and commands tables |
+| `docs/` | The user guide, one topic per file: setup, the timer, inspection, sessions, stats, import and export, data, scrambles |
 
 ## Non-negotiable rules
 
@@ -118,5 +119,7 @@ reason to touch the other.
 
 1. `cargo test` is fully green.
 2. `cargo clippy --all-targets` is silent.
-3. The docs match the code: `README.md` for anything a user can see, `claude-docs/*` for
-   anything a contributor needs to know.
+3. The docs match the code. Anything a user can see belongs in `docs/`, on the page for
+   that topic, with `README.md` updated only when the change touches the front door: the
+   keys table, the commands table or the quick start. Anything a contributor needs to know
+   belongs in `claude-docs/*`.
