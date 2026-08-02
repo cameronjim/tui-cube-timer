@@ -1,4 +1,4 @@
-//! Random-move scramble generation in WCA notation.
+//! Random-move scrambles for the NxN cubes, 2x2 through 7x7.
 
 use crate::types::Puzzle;
 use rand::Rng;
@@ -72,7 +72,7 @@ const POOL_7: &[MoveType] = &[
 
 const SUFFIXES: [&str; 3] = ["", "'", "2"];
 
-/// The move pool for a puzzle.
+/// The move pool for a cube. Only the six cube variants ever reach this module.
 fn pool(puzzle: Puzzle) -> &'static [MoveType] {
     match puzzle {
         Puzzle::Cube2 => POOL_2,
@@ -81,6 +81,7 @@ fn pool(puzzle: Puzzle) -> &'static [MoveType] {
         Puzzle::Cube5 => POOL_5,
         Puzzle::Cube6 => POOL_6,
         Puzzle::Cube7 => POOL_7,
+        other => unreachable!("{} is not an NxN cube", other.name()),
     }
 }
 
@@ -93,6 +94,7 @@ fn move_count(puzzle: Puzzle) -> usize {
         Puzzle::Cube5 => 60,
         Puzzle::Cube6 => 80,
         Puzzle::Cube7 => 100,
+        other => unreachable!("{} is not an NxN cube", other.name()),
     }
 }
 
@@ -107,14 +109,8 @@ fn is_legal(candidate: MoveType, run: &[MoveType]) -> bool {
     }
 }
 
-/// Random-move scramble in WCA notation, moves separated by single spaces.
-pub fn generate(puzzle: Puzzle) -> String {
-    let mut rng = rand::thread_rng();
-    generate_with_rng(puzzle, &mut rng)
-}
-
-/// The same scramble, drawing randomness from `rng` so a seed always repeats.
-pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
+/// Random-move cube scramble in WCA notation, moves separated by single spaces.
+pub fn scramble<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
     let pool = pool(puzzle);
     let count = move_count(puzzle);
 
@@ -152,8 +148,19 @@ pub fn generate_with_rng<R: Rng>(puzzle: Puzzle, rng: &mut R) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scramble::generate;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    /// The puzzles this module answers for.
+    const CUBES: [Puzzle; 6] = [
+        Puzzle::Cube2,
+        Puzzle::Cube3,
+        Puzzle::Cube4,
+        Puzzle::Cube5,
+        Puzzle::Cube6,
+        Puzzle::Cube7,
+    ];
 
     /// Parse a scramble token like "3Rw'" into (move type name, suffix).
     fn split_token(token: &str) -> (&str, &str) {
@@ -231,24 +238,25 @@ mod tests {
             Puzzle::Cube5 => 60,
             Puzzle::Cube6 => 80,
             Puzzle::Cube7 => 100,
+            other => unreachable!("{} is not an NxN cube", other.name()),
         }
     }
 
     #[test]
     fn lengths_pool_and_constraints_hold_over_many_generations() {
-        for puzzle in Puzzle::ALL {
+        for puzzle in CUBES {
             let want = expected_len(puzzle);
             for seed in 0..400u64 {
                 let mut rng = StdRng::seed_from_u64(seed);
-                let scramble = generate_with_rng(puzzle, &mut rng);
-                let moves = decode(&scramble, pool(puzzle));
+                let s = scramble(puzzle, &mut rng);
+                let moves = decode(&s, pool(puzzle));
                 assert_eq!(
                     moves.len(),
                     want,
-                    "{} produced the wrong move count: {scramble:?}",
+                    "{} produced the wrong move count: {s:?}",
                     puzzle.name()
                 );
-                assert_constraints(&moves, &scramble);
+                assert_constraints(&moves, &s);
             }
         }
     }
@@ -257,13 +265,9 @@ mod tests {
     fn two_by_two_is_always_eleven_moves_of_u_r_f() {
         for seed in 0..200u64 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let scramble = generate_with_rng(Puzzle::Cube2, &mut rng);
-            let moves = decode(&scramble, POOL_2);
-            assert_eq!(
-                moves.len(),
-                11,
-                "2x2 must be exactly 11 moves: {scramble:?}"
-            );
+            let s = scramble(Puzzle::Cube2, &mut rng);
+            let moves = decode(&s, POOL_2);
+            assert_eq!(moves.len(), 11, "2x2 must be exactly 11 moves: {s:?}");
         }
     }
 
@@ -303,7 +307,7 @@ mod tests {
         let mut double = false;
         for seed in 0..50u64 {
             let mut rng = StdRng::seed_from_u64(seed);
-            for token in generate_with_rng(Puzzle::Cube3, &mut rng)
+            for token in scramble(Puzzle::Cube3, &mut rng)
                 .split(' ')
                 .map(|t| split_token(t).1)
             {
@@ -320,22 +324,22 @@ mod tests {
 
     #[test]
     fn seeded_generation_is_deterministic() {
-        for puzzle in Puzzle::ALL {
-            let a = generate_with_rng(puzzle, &mut StdRng::seed_from_u64(1234));
-            let b = generate_with_rng(puzzle, &mut StdRng::seed_from_u64(1234));
+        for puzzle in CUBES {
+            let a = scramble(puzzle, &mut StdRng::seed_from_u64(1234));
+            let b = scramble(puzzle, &mut StdRng::seed_from_u64(1234));
             assert_eq!(a, b, "same seed must give the same scramble");
-            let c = generate_with_rng(puzzle, &mut StdRng::seed_from_u64(4321));
+            let c = scramble(puzzle, &mut StdRng::seed_from_u64(4321));
             assert_ne!(a, c, "different seeds should give different scrambles");
         }
     }
 
     #[test]
     fn thread_rng_generate_is_well_formed() {
-        for puzzle in Puzzle::ALL {
-            let scramble = generate(puzzle);
-            let moves = decode(&scramble, pool(puzzle));
+        for puzzle in CUBES {
+            let s = generate(puzzle);
+            let moves = decode(&s, pool(puzzle));
             assert_eq!(moves.len(), expected_len(puzzle));
-            assert_constraints(&moves, &scramble);
+            assert_constraints(&moves, &s);
         }
     }
 
@@ -362,8 +366,8 @@ mod tests {
         let mut seen = false;
         for seed in 0..200u64 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let scramble = generate_with_rng(Puzzle::Cube7, &mut rng);
-            let moves = decode(&scramble, POOL_7);
+            let s = scramble(Puzzle::Cube7, &mut rng);
+            let moves = decode(&s, POOL_7);
             seen |= moves
                 .windows(3)
                 .any(|w| w[0].axis() == w[1].axis() && w[1].axis() == w[2].axis());

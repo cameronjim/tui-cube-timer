@@ -1,0 +1,22 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # parking_lot and parking_lot_core are pinned to exact versions in Cargo.toml.
+      # parking_lot_core 0.9.11 moved to windows-link and raw-dylib, which the
+      # maintainer's stable-x86_64-pc-windows-gnu toolchain cannot link without
+      # mingw-w64 binutils. The comment above the pins in Cargo.toml has the detail.
+      # Any bump here breaks the local Windows build, so no updates are wanted at all.
+      - dependency-name: parking_lot
+      - dependency-name: parking_lot_core
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

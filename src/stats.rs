@@ -5,13 +5,14 @@ use crate::types::{Session, Solve};
 use std::cmp::Ordering;
 
 /// Outcome of an average computation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AvgResult {
     /// A valid average, in milliseconds (truncated).
     Time(u64),
     /// Too many DNFs in the window for a valid average.
     Dnf,
-    /// Fewer solves available than the average requires.
+    /// Fewer solves available than the average requires. The default: no solves is not enough.
+    #[default]
     NotEnough,
 }
 
@@ -88,8 +89,8 @@ pub fn best_average_of(n: usize, solves: &[Solve]) -> Option<u64> {
     best
 }
 
-/// Summary statistics for one session's solve list.
-#[derive(Debug, Clone)]
+/// Summary statistics for one session's solve list. The default is an empty session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionStats {
     /// Total solves, including DNFs.
     pub count: usize,
@@ -131,7 +132,7 @@ pub fn session_stats(solves: &[Solve]) -> SessionStats {
 }
 
 /// All-time personal bests.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersonalBests {
     pub single: Option<u64>,
     pub ao5: Option<u64>,
@@ -470,6 +471,21 @@ mod tests {
         assert_eq!(st.ao5, AvgResult::NotEnough);
         assert_eq!(st.ao12, AvgResult::NotEnough);
         assert_eq!(st.ao100, AvgResult::NotEnough);
+    }
+
+    #[test]
+    fn the_default_stats_describe_an_empty_session() {
+        // `App` starts from the default before its first refresh, so the two must agree.
+        let d = SessionStats::default();
+        let empty = session_stats(&[]);
+        assert_eq!(d.count, empty.count);
+        assert_eq!(d.valid_count, empty.valid_count);
+        assert_eq!(d.best, empty.best);
+        assert_eq!(d.worst, empty.worst);
+        assert_eq!(d.mean, empty.mean);
+        assert_eq!(d.ao5, empty.ao5);
+        assert_eq!(d.ao12, empty.ao12);
+        assert_eq!(d.ao100, empty.ao100);
     }
 
     #[test]

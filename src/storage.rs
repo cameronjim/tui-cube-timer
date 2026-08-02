@@ -4,6 +4,7 @@ use crate::types::{Puzzle, SaveFile, Session, FIRST_USER_ID, SAVE_VERSION};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const DATA_ENV_VAR: &str = "CUBETIMER_DATA";
 /// File name used inside the platform data directory (and by the fallback).
 const DATA_FILE_NAME: &str = "sessions.json";
+/// Largest file `load` will read into memory. A lifetime of solves is a few megabytes at most.
+const MAX_SAVE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Sessions file path: `CUBETIMER_DATA` (a full file path), else the platform data dir, else `./sessions.json`.
 pub fn data_file_path() -> PathBuf {
@@ -31,12 +34,18 @@ pub fn data_file_path() -> PathBuf {
 /// written back until the app saves. A file from a newer build is refused rather than guessed at,
 /// because its fields could mean something this build does not know about.
 pub fn load(path: &Path) -> io::Result<SaveFile> {
+    // Check the size first: `fs::read` would allocate the whole file before anyone could object.
+    match fs::metadata(path) {
+        Ok(meta) => check_size(meta.len(), path)?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SaveFile::default()),
+        Err(err) => return Err(err),
+    }
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(SaveFile::default()),
         Err(err) => return Err(err),
     };
-    let save = serde_json::from_slice::<SaveFile>(&bytes).map_err(|err| {
+    let mut save = serde_json::from_slice::<SaveFile>(&bytes).map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{} is not a valid cubetimer data file: {}", path.display(), err),
@@ -53,14 +62,31 @@ pub fn load(path: &Path) -> io::Result<SaveFile> {
             ),
         ));
     }
-    Ok(if save.version < SAVE_VERSION {
-        migrate_to_v2(save)
-    } else {
-        save
-    })
+    // One step per format bump, so each stays a small transformation of the one before it.
+    if save.version < 2 {
+        save = migrate_to_v2(save);
+    }
+    if save.version < 3 {
+        save = migrate_to_v3(save);
+    }
+    Ok(save)
 }
 
-/// Migrate a version-1 file: six permanent default sessions, user sessions renumbered from [`FIRST_USER_ID`].
+/// The six defaults a version-2 file was built around, in id order.
+const V2_DEFAULT_ORDER: [Puzzle; 6] = [
+    Puzzle::Cube3,
+    Puzzle::Cube2,
+    Puzzle::Cube4,
+    Puzzle::Cube5,
+    Puzzle::Cube6,
+    Puzzle::Cube7,
+];
+/// First user id in a version-2 file: ids 1 through 6 were the reserved defaults.
+const V2_FIRST_USER_ID: u64 = 7;
+/// How far version 3 pushes every version-2 user id up, one slot per new default event.
+const V3_ID_SHIFT: u64 = 5;
+
+/// Migrate a version-1 file: six permanent default sessions, user sessions renumbered from [`V2_FIRST_USER_ID`].
 ///
 /// A version-1 file has one session per `/new`, ids from 1, and no reserved range. Each old session
 /// named "default" folds into its puzzle's new default, carrying its solves and creation time, so an
@@ -68,20 +94,21 @@ pub fn load(path: &Path) -> io::Result<SaveFile> {
 /// puzzle, solves and file order and is renumbered out of the reserved range. The active session
 /// follows whichever session it became.
 fn migrate_to_v2(old: SaveFile) -> SaveFile {
-    let mut sessions: Vec<Session> = Puzzle::DEFAULT_ORDER
+    let mut sessions: Vec<Session> = V2_DEFAULT_ORDER
         .into_iter()
         .map(Session::default_for)
         .collect();
     // One flag per default, so a second session called "default" is renumbered instead of merged over the first.
-    let mut merged = [false; Puzzle::DEFAULT_ORDER.len()];
-    let mut next_session_id = FIRST_USER_ID;
+    let mut merged = [false; V2_DEFAULT_ORDER.len()];
+    let mut next_session_id = V2_FIRST_USER_ID;
     let mut active_session_id = None;
 
     for session in old.sessions {
         let old_id = session.id;
-        // `DEFAULT_ORDER` is in id order, so a puzzle's default sits at `id - 1`.
+        // `V2_DEFAULT_ORDER` is in id order, so a puzzle's default sits at `id - 1`.
         let slot = (session.puzzle.default_session_id() - 1) as usize;
-        let new_id = if session.name == "default" && !merged[slot] {
+        // A hand-edited version-1 file naming an event that only exists in version 3 has no slot here.
+        let new_id = if session.name == "default" && matches!(merged.get(slot), Some(false)) {
             merged[slot] = true;
             sessions[slot].solves = session.solves;
             sessions[slot].created_at = session.created_at;
@@ -98,11 +125,75 @@ fn migrate_to_v2(old: SaveFile) -> SaveFile {
     }
 
     SaveFile {
-        version: SAVE_VERSION,
+        version: 2,
         next_session_id,
         sessions,
         active_session_id: active_session_id.unwrap_or_else(|| Puzzle::Cube3.default_session_id()),
     }
+}
+
+/// Migrate a version-2 file: Pyraminx, Skewb, Megaminx, Square-1 and Clock take ids 7 through 11.
+///
+/// Those ids belonged to user sessions in version 2, so every session at or above
+/// [`V2_FIRST_USER_ID`] moves up by [`V3_ID_SHIFT`], keeping its name, puzzle, solves and file
+/// order. The five new defaults are inserted behind the six that already existed, and the active
+/// session follows its renumbering.
+fn migrate_to_v3(old: SaveFile) -> SaveFile {
+    let mut defaults: Vec<Session> = Vec::new();
+    let mut users: Vec<Session> = Vec::new();
+    let mut active_session_id = old.active_session_id;
+
+    for session in old.sessions {
+        if session.id < V2_FIRST_USER_ID {
+            defaults.push(session);
+        } else {
+            let id = session.id.saturating_add(V3_ID_SHIFT);
+            if session.id == old.active_session_id {
+                active_session_id = id;
+            }
+            users.push(Session { id, ..session });
+        }
+    }
+
+    // The five events version 3 adds, each on the id `types` reserves for it.
+    defaults.extend(
+        Puzzle::DEFAULT_ORDER
+            .into_iter()
+            .filter(|p| p.default_session_id() >= V2_FIRST_USER_ID)
+            .map(Session::default_for),
+    );
+
+    let next_session_id = users
+        .iter()
+        .map(|s| s.id.saturating_add(1))
+        .max()
+        .unwrap_or(FIRST_USER_ID)
+        .max(FIRST_USER_ID);
+
+    defaults.append(&mut users);
+
+    SaveFile {
+        version: SAVE_VERSION,
+        next_session_id,
+        sessions: defaults,
+        active_session_id,
+    }
+}
+
+/// Reject a file too large to be one of ours, naming the path and the ceiling.
+fn check_size(len: u64, path: &Path) -> io::Result<()> {
+    if len > MAX_SAVE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is {} bytes, past the {} byte limit cubetimer will read",
+                path.display(),
+                len,
+                MAX_SAVE_BYTES
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Write pretty JSON atomically via a sibling `<name>.tmp` + rename, creating parent dirs.
@@ -118,13 +209,38 @@ pub fn save(path: &Path, data: &SaveFile) -> io::Result<()> {
     json.push('\n');
 
     let tmp = tmp_path(path);
-    fs::write(&tmp, json.as_bytes())?;
+    write_fresh(&tmp, json.as_bytes())?;
     // `fs::rename` replaces an existing destination on both Unix and Windows.
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err);
     }
     Ok(())
+}
+
+/// Write `bytes` to a file this call creates, never to one that was already there.
+///
+/// `fs::write` opens the path however it finds it, so a symlink planted at the scratch path
+/// would redirect the write. `create_new` refuses any existing path instead. The one thing
+/// legitimately found there is a `.tmp` left by a crashed run, so a single retry clears it;
+/// a second failure is real and propagates.
+fn write_fresh(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = match create_new(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            create_new(path)?
+        }
+        Err(err) => return Err(err),
+    };
+    file.write_all(bytes)
+}
+
+fn create_new(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 /// Current Unix epoch time in milliseconds (0 if the clock predates the epoch).
@@ -185,7 +301,7 @@ mod tests {
         }
     }
 
-    /// A current-version file: the six defaults, solves on the 3x3 one, plus a user session.
+    /// A current-version file: the eleven defaults, solves on the 3x3 one, plus a user session.
     fn sample() -> SaveFile {
         let mut save = SaveFile::default();
         save.sessions[0].solves = vec![
@@ -261,6 +377,69 @@ mod tests {
             !tmp_path(file.path()).exists(),
             "temporary file should be renamed away"
         );
+    }
+
+    // ---- the size ceiling
+
+    #[test]
+    fn check_size_accepts_everything_up_to_the_limit() {
+        let path = Path::new("sessions.json");
+        assert!(check_size(0, path).is_ok());
+        assert!(check_size(MAX_SAVE_BYTES - 1, path).is_ok());
+        assert!(check_size(MAX_SAVE_BYTES, path).is_ok(), "the limit itself is allowed");
+    }
+
+    #[test]
+    fn check_size_rejects_one_byte_past_the_limit() {
+        let path = Path::new("some/where/sessions.json");
+        let err = check_size(MAX_SAVE_BYTES + 1, path).expect_err("must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let text = err.to_string();
+        assert!(text.contains("sessions.json"), "the error names the path: {text}");
+        assert!(
+            text.contains(&MAX_SAVE_BYTES.to_string()),
+            "the error names the limit: {text}"
+        );
+        assert!(check_size(u64::MAX, path).is_err());
+    }
+
+    #[test]
+    fn a_normal_file_is_well_under_the_ceiling() {
+        let file = TempFile::new("ceiling");
+        save(file.path(), &sample()).expect("save");
+        let len = fs::metadata(file.path()).expect("metadata").len();
+        assert!(len < MAX_SAVE_BYTES, "a real save file is {len} bytes");
+        assert!(load(file.path()).is_ok());
+    }
+
+    // ---- the scratch file
+
+    #[test]
+    fn save_replaces_a_tmp_file_left_by_a_crashed_run() {
+        let file = TempFile::new("staletmp");
+        let tmp = tmp_path(file.path());
+        fs::write(&tmp, b"leftover garbage from a crash").expect("plant a stale tmp");
+
+        save(file.path(), &sample()).expect("save must clear the stale tmp and retry");
+
+        assert!(!tmp.exists(), "the tmp file is renamed away");
+        let loaded = load(file.path()).expect("load");
+        assert_same(&sample(), &loaded);
+    }
+
+    #[test]
+    fn save_fails_rather_than_write_through_something_it_did_not_create() {
+        // A directory at the scratch path is the portable stand-in for a planted symlink:
+        // both mean "this path already exists", which `create_new` refuses.
+        let file = TempFile::new("tmpdir");
+        let tmp = tmp_path(file.path());
+        fs::create_dir_all(&tmp).expect("plant a directory at the tmp path");
+
+        let err = save(file.path(), &sample()).expect_err("must not write into it");
+        assert!(!file.path().exists(), "the real file is left untouched");
+
+        let _ = fs::remove_dir_all(&tmp);
+        drop(err);
     }
 
     #[test]
@@ -344,6 +523,11 @@ mod tests {
                 (4, "default", Puzzle::Cube5),
                 (5, "default", Puzzle::Cube6),
                 (6, "default", Puzzle::Cube7),
+                (7, "default", Puzzle::Pyraminx),
+                (8, "default", Puzzle::Skewb),
+                (9, "default", Puzzle::Megaminx),
+                (10, "default", Puzzle::Square1),
+                (11, "default", Puzzle::Clock),
             ]
         );
         assert!(save.sessions.iter().all(|s| s.solves.is_empty()));
@@ -379,7 +563,7 @@ mod tests {
     }"#;
 
     #[test]
-    fn a_version_one_file_migrates_to_the_six_defaults() {
+    fn a_version_one_file_migrates_all_the_way_to_the_current_format() {
         let file = TempFile::new("migrate-v1");
         fs::write(file.path(), V1_FILE).expect("write");
         let loaded = load(file.path()).expect("a version 1 file must still load");
@@ -454,16 +638,16 @@ mod tests {
 
     #[test]
     fn a_current_version_file_loads_untouched() {
-        let file = TempFile::new("v2-untouched");
+        let file = TempFile::new("v3-untouched");
         fs::write(
             file.path(),
             br#"{
-              "version": 2,
-              "next_session_id": 9,
+              "version": 3,
+              "next_session_id": 14,
               "sessions": [
-                { "id": 8, "name": "evening", "puzzle": "5x5", "solves": [], "created_at": 12 }
+                { "id": 13, "name": "evening", "puzzle": "5x5", "solves": [], "created_at": 12 }
               ],
-              "active_session_id": 8
+              "active_session_id": 13
             }"#,
         )
         .expect("write");
@@ -472,16 +656,144 @@ mod tests {
         assert_eq!(loaded.version, SAVE_VERSION);
         assert_eq!(loaded.sessions.len(), 1, "load must not inject defaults");
         assert_eq!(loaded.sessions[0].name, "evening");
-        assert_eq!(loaded.next_session_id, 9);
-        assert_eq!(loaded.active_session_id, 8);
+        assert_eq!(loaded.next_session_id, 14);
+        assert_eq!(loaded.active_session_id, 13);
+    }
+
+    /// A hand-written version-2 file: the six old defaults plus one user session on id 7.
+    const V2_FILE: &str = r#"{
+      "version": 2,
+      "next_session_id": 8,
+      "sessions": [
+        { "id": 1, "name": "default", "puzzle": "3x3", "solves": [
+            { "millis": 12345, "penalty": "None", "scramble": "R U R' U'", "timestamp": 1700000000000 }
+          ], "created_at": 11 },
+        { "id": 2, "name": "default", "puzzle": "2x2", "solves": [], "created_at": 12 },
+        { "id": 3, "name": "default", "puzzle": "4x4", "solves": [], "created_at": 13 },
+        { "id": 4, "name": "default", "puzzle": "5x5", "solves": [], "created_at": 14 },
+        { "id": 5, "name": "default", "puzzle": "6x6", "solves": [], "created_at": 15 },
+        { "id": 6, "name": "default", "puzzle": "7x7", "solves": [], "created_at": 16 },
+        { "id": 7, "name": "one-handed", "puzzle": "3x3", "solves": [
+            { "millis": 4000, "penalty": "None", "scramble": "R U", "timestamp": 1700000002000 }
+          ], "created_at": 17 }
+      ],
+      "active_session_id": 7
+    }"#;
+
+    #[test]
+    fn a_version_two_file_gains_the_five_new_defaults_and_renumbers_user_sessions() {
+        let file = TempFile::new("migrate-v2");
+        fs::write(file.path(), V2_FILE).expect("write");
+        let loaded = load(file.path()).expect("a version 2 file must still load");
+
+        assert_eq!(loaded.version, SAVE_VERSION);
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+
+        // The six old defaults keep their ids, solves and creation times.
+        let three = &loaded.sessions[0];
+        assert_eq!((three.id, three.puzzle), (1, Puzzle::Cube3));
+        assert_eq!(three.solves.len(), 1);
+        assert_eq!(three.created_at, 11);
+
+        // The five new events arrive on ids 7 through 11, behind the ones already there.
+        let added: Vec<(u64, Puzzle)> = loaded.sessions[6..11]
+            .iter()
+            .map(|s| (s.id, s.puzzle))
+            .collect();
+        assert_eq!(
+            added,
+            vec![
+                (7, Puzzle::Pyraminx),
+                (8, Puzzle::Skewb),
+                (9, Puzzle::Megaminx),
+                (10, Puzzle::Square1),
+                (11, Puzzle::Clock),
+            ]
+        );
+        assert!(loaded.sessions[6..11]
+            .iter()
+            .all(|s| s.name == "default" && s.solves.is_empty()));
+
+        // The user session moves out of the way of them, keeping everything but its id.
+        let user = &loaded.sessions[11];
+        assert_eq!(user.id, FIRST_USER_ID, "old id 7 moves up by five");
+        assert_eq!(user.name, "one-handed");
+        assert_eq!(user.puzzle, Puzzle::Cube3);
+        assert_eq!(user.solves.len(), 1);
+        assert_eq!(user.created_at, 17);
+
+        assert_eq!(
+            loaded.active_session_id, FIRST_USER_ID,
+            "the active session follows its renumbering"
+        );
+        assert_eq!(loaded.next_session_id, FIRST_USER_ID + 1);
+
+        // Migration is in memory only: the file on disk is still the version 2 text.
+        assert_eq!(fs::read_to_string(file.path()).expect("read back"), V2_FILE);
+    }
+
+    #[test]
+    fn a_version_two_file_without_user_sessions_lands_on_the_first_user_id() {
+        let file = TempFile::new("migrate-v2-bare");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 2,
+              "next_session_id": 7,
+              "sessions": [
+                { "id": 1, "name": "default", "puzzle": "3x3", "solves": [], "created_at": 1 }
+              ],
+              "active_session_id": 1
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+
+        assert_eq!(loaded.sessions.len(), 6, "only the five new defaults arrive");
+        assert_eq!(loaded.next_session_id, FIRST_USER_ID);
+        assert_eq!(loaded.active_session_id, 1);
+    }
+
+    #[test]
+    fn version_three_renumbering_keeps_every_user_session_in_order() {
+        let file = TempFile::new("migrate-v2-many");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 2,
+              "next_session_id": 31,
+              "sessions": [
+                { "id": 9,  "name": "b", "puzzle": "2x2", "solves": [], "created_at": 2 },
+                { "id": 7,  "name": "a", "puzzle": "3x3", "solves": [], "created_at": 1 },
+                { "id": 30, "name": "c", "puzzle": "4x4", "solves": [], "created_at": 3 }
+              ],
+              "active_session_id": 9
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+
+        let users: Vec<(u64, &str)> = loaded
+            .sessions
+            .iter()
+            .filter(|s| s.id >= FIRST_USER_ID)
+            .map(|s| (s.id, s.name.as_str()))
+            .collect();
+        assert_eq!(
+            users,
+            vec![(14, "b"), (12, "a"), (35, "c")],
+            "every user id shifts by five and file order survives"
+        );
+        assert_eq!(loaded.active_session_id, 14);
+        assert_eq!(loaded.next_session_id, 36);
     }
 
     #[test]
     fn a_newer_version_file_is_an_error() {
-        let file = TempFile::new("v3");
+        let file = TempFile::new("v4");
         let text = r#"{
-          "version": 3,
-          "next_session_id": 7,
+          "version": 4,
+          "next_session_id": 12,
           "sessions": [],
           "active_session_id": 1
         }"#;

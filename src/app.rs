@@ -1,11 +1,13 @@
 //! Timer state machine, key handling and `/commands`; `ui.rs` renders only from [`App`] fields refreshed here.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::scramble;
+use crate::stats::{self, PersonalBests, SessionStats};
 use crate::storage;
 use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve, FIRST_USER_ID};
 
@@ -53,6 +55,10 @@ pub struct App {
     pub inspection_remaining: Option<i64>,
     pub pending_inspection_penalty: Penalty,
     pub data_path: PathBuf,
+    /// Statistics for the active session, cached by [`App::refresh_derived`].
+    pub stats: SessionStats,
+    /// All-time bests across every session of the active puzzle, cached by [`App::refresh_derived`].
+    pub pbs: PersonalBests,
 
     // --- internal bookkeeping (not part of the ui.rs contract) ---
     /// Inspection start, kept while armed so an aborted arm restores the countdown.
@@ -74,7 +80,7 @@ impl App {
             .map(|s| s.puzzle)
             .unwrap_or(Puzzle::Cube3);
 
-        App {
+        let mut app = App {
             save,
             state: TimerState::Idle,
             input_mode: InputMode::Normal,
@@ -89,17 +95,26 @@ impl App {
             inspection_remaining: None,
             pending_inspection_penalty: Penalty::None,
             data_path,
+            stats: SessionStats::default(),
+            pbs: PersonalBests::default(),
             inspection_start: None,
             inert_key: None,
             stopped_at: None,
-        }
+        };
+        app.refresh_derived();
+        app
     }
 
-    /// Restore invariants: the six defaults exist, they sort first, the active id is real, `next_session_id` is free.
+    /// Restore invariants: ids are unique, each reserved id holds its own puzzle, the eleven
+    /// defaults exist and sort first, the active id is real, `next_session_id` is free.
     ///
     /// Structural repair only, for a hand-edited or truncated file. Reading an older format is
     /// `storage::load`'s job, and by the time this runs the file is already at the current version.
     fn sanitize(save: &mut SaveFile) {
+        Self::free_next_id(save);
+        Self::dedupe_ids(save);
+        Self::evict_misfiled_defaults(save);
+
         for puzzle in Puzzle::DEFAULT_ORDER {
             if !save
                 .sessions
@@ -111,7 +126,14 @@ impl App {
         }
         save.sessions.sort_by_key(|s| s.id);
 
-        // The next id must clear every id in use and the whole reserved range below `FIRST_USER_ID`.
+        Self::free_next_id(save);
+        if !save.sessions.iter().any(|s| s.id == save.active_session_id) {
+            save.active_session_id = Puzzle::Cube3.default_session_id();
+        }
+    }
+
+    /// Raise `next_session_id` clear of every id in use and of the whole reserved range.
+    fn free_next_id(save: &mut SaveFile) {
         let floor = save
             .sessions
             .iter()
@@ -122,9 +144,69 @@ impl App {
         if save.next_session_id <= floor {
             save.next_session_id = floor.saturating_add(1);
         }
-        if !save.sessions.iter().any(|s| s.id == save.active_session_id) {
-            save.active_session_id = Puzzle::Cube3.default_session_id();
+    }
+
+    /// Hand out the next free user id. Call [`App::free_next_id`] first on untrusted input.
+    fn take_id(save: &mut SaveFile) -> u64 {
+        let id = save.next_session_id;
+        save.next_session_id = save.next_session_id.saturating_add(1);
+        id
+    }
+
+    /// Give a fresh user id to every session after the first that claims an id already taken.
+    ///
+    /// Duplicate ids would make `/session <id>`, `/delsession` and the active-session lookup
+    /// resolve to whichever copy came first, silently orphaning the rest.
+    fn dedupe_ids(save: &mut SaveFile) {
+        let mut seen: HashSet<u64> = HashSet::new();
+        for i in 0..save.sessions.len() {
+            let id = save.sessions[i].id;
+            if seen.insert(id) {
+                continue;
+            }
+            let fresh = Self::take_id(save);
+            save.sessions[i].id = fresh;
+            seen.insert(fresh);
         }
+    }
+
+    /// Move any session holding a reserved id that is not its own puzzle's out to a user id.
+    ///
+    /// The default it displaced is recreated by [`App::sanitize`], so `/megaminx` always lands
+    /// on a Megaminx session rather than on whatever an edited file parked at id 9. The session
+    /// keeps its solves, and the active id follows it.
+    fn evict_misfiled_defaults(save: &mut SaveFile) {
+        for i in 0..save.sessions.len() {
+            let session = &save.sessions[i];
+            if session.id >= FIRST_USER_ID || session.id == session.puzzle.default_session_id() {
+                continue;
+            }
+            let old = session.id;
+            let fresh = Self::take_id(save);
+            save.sessions[i].id = fresh;
+            if save.active_session_id == old {
+                save.active_session_id = fresh;
+            }
+        }
+    }
+
+    /// Recompute the statistics `ui.rs` renders from.
+    ///
+    /// Both walk every solve of the puzzle, so the 15 ms draw loop must never call them.
+    /// Every path that changes the solve list, a penalty, the session list or the active
+    /// session calls this instead; `/rename` is the one mutation that changes neither.
+    fn refresh_derived(&mut self) {
+        let puzzle = self.current_session().puzzle;
+        let stats = stats::session_stats(&self.current_session().solves);
+        let of_puzzle: Vec<&Session> = self
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.puzzle == puzzle)
+            .collect();
+        let pbs = stats::personal_bests(&of_puzzle);
+        self.stats = stats;
+        self.pbs = pbs;
     }
 
     fn active_index(&self) -> usize {
@@ -242,6 +324,7 @@ impl App {
         self.state = TimerState::Idle;
         self.stopped_at = Some(Instant::now());
         self.new_scramble();
+        self.refresh_derived();
         self.save_now();
     }
 
@@ -505,6 +588,7 @@ impl App {
             session.puzzle = puzzle;
             let name = session.name.clone();
             self.new_scramble();
+            self.refresh_derived();
             self.status(format!("session '{}' is now {}", name, puzzle.name()));
             self.save_now();
             return;
@@ -513,6 +597,7 @@ impl App {
         // Otherwise navigate, never retype: the puzzle's permanent default is always the destination.
         self.save.active_session_id = puzzle.default_session_id();
         self.new_scramble();
+        self.refresh_derived();
         let name = self.current_session().name.clone();
         self.status(format!("{} · session: {}", puzzle.name(), name));
         self.save_now();
@@ -549,6 +634,7 @@ impl App {
         let id = self.push_session(name.clone(), puzzle);
         self.save.active_session_id = id;
         self.new_scramble();
+        self.refresh_derived();
         self.status(format!("new session: {} (#{})", name, id));
         self.save_now();
     }
@@ -590,6 +676,7 @@ impl App {
         }
         self.save.active_session_id = id;
         self.new_scramble();
+        self.refresh_derived();
         let s = self.current_session();
         let msg = format!("session: {} ({})", s.name, s.puzzle.name());
         self.status(msg);
@@ -638,6 +725,7 @@ impl App {
             self.save.active_session_id = removed.puzzle.default_session_id();
             self.new_scramble();
         }
+        self.refresh_derived();
         self.status(format!("deleted session: {} (#{})", removed.name, removed.id));
         self.save_now();
     }
@@ -647,6 +735,7 @@ impl App {
         match popped {
             Some(s) => {
                 self.times_scroll = 0;
+                self.refresh_derived();
                 let msg = format!("deleted {}", crate::types::format_solve(&s));
                 self.status(msg);
                 self.save_now();
@@ -665,6 +754,7 @@ impl App {
         };
         match shown {
             Some(text) => {
+                self.refresh_derived();
                 self.status(format!("last solve: {}", text));
                 self.save_now();
             }
@@ -1353,7 +1443,7 @@ mod tests {
         run_command(&mut app, "2x2");
         run_command(&mut app, "new mini");
         let mini = app.current_session().id;
-        assert_eq!(mini, FIRST_USER_ID, "user sessions start at 7");
+        assert_eq!(mini, FIRST_USER_ID, "user sessions start above the defaults");
         add_solve(&mut app, 3_000);
 
         // Leaving a user session that has solves lands on the target puzzle's default.
@@ -1413,6 +1503,113 @@ mod tests {
             .find(|s| s.id == id)
             .expect("the retyped session survives");
         assert_eq!(session.puzzle, Puzzle::Cube6);
+    }
+
+    #[test]
+    fn the_five_non_cube_events_navigate_to_their_own_default_sessions() {
+        let (mut app, _g) = test_app("cmd-wca-events");
+        for puzzle in [
+            Puzzle::Pyraminx,
+            Puzzle::Skewb,
+            Puzzle::Megaminx,
+            Puzzle::Square1,
+            Puzzle::Clock,
+        ] {
+            run_command(&mut app, puzzle.name());
+            assert_eq!(app.current_session().puzzle, puzzle);
+            assert_eq!(
+                app.current_session().id,
+                puzzle.default_session_id(),
+                "/{} must land on its default",
+                puzzle.name()
+            );
+            assert_eq!(app.current_session().name, "default");
+            assert_eq!(
+                app.status_msg.as_deref(),
+                Some(format!("{} · session: default", puzzle.name()).as_str())
+            );
+            assert!(!app.scramble.is_empty());
+        }
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len(),
+            "navigation never creates a session"
+        );
+
+        let loaded = storage::load(&app.data_path).expect("switching persists");
+        assert_eq!(loaded.active_session_id, Puzzle::Clock.default_session_id());
+    }
+
+    #[test]
+    fn the_new_events_sit_on_the_reserved_ids_seven_through_eleven() {
+        let (mut app, _g) = test_app("cmd-wca-ids");
+        run_command(&mut app, "pyra");
+        assert_eq!(app.current_session().id, 7);
+        run_command(&mut app, "skewb");
+        assert_eq!(app.current_session().id, 8);
+        run_command(&mut app, "megaminx");
+        assert_eq!(app.current_session().id, 9);
+        run_command(&mut app, "sq1");
+        assert_eq!(app.current_session().id, 10);
+        run_command(&mut app, "clock");
+        assert_eq!(app.current_session().id, 11);
+    }
+
+    #[test]
+    fn every_alias_reaches_the_same_default_session() {
+        let (mut app, _g) = test_app("cmd-wca-aliases");
+        for (alias, puzzle) in [
+            ("pyra", Puzzle::Pyraminx),
+            ("PYRAMINX", Puzzle::Pyraminx),
+            ("Skewb", Puzzle::Skewb),
+            ("mega", Puzzle::Megaminx),
+            ("MEGAMINX", Puzzle::Megaminx),
+            ("square1", Puzzle::Square1),
+            ("square-1", Puzzle::Square1),
+            ("SQ1", Puzzle::Square1),
+            ("Clock", Puzzle::Clock),
+        ] {
+            run_command(&mut app, alias);
+            assert_eq!(
+                app.current_session().id,
+                puzzle.default_session_id(),
+                "/{alias} should be {}",
+                puzzle.name()
+            );
+        }
+
+        run_command(&mut app, "pyraminx2");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("unknown command: pyraminx2")
+        );
+    }
+
+    #[test]
+    fn an_empty_user_session_retypes_onto_a_new_event() {
+        let (mut app, _g) = test_app("cmd-retype-skewb");
+        run_command(&mut app, "new evening");
+        let id = app.current_session().id;
+        let count = app.save.sessions.len();
+
+        run_command(&mut app, "skewb");
+
+        assert_eq!(app.save.sessions.len(), count, "no new session is created");
+        assert_eq!(app.current_session().id, id, "same session, new puzzle");
+        assert_eq!(app.current_session().puzzle, Puzzle::Skewb);
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("session 'evening' is now skewb")
+        );
+        assert!(!app.scramble.is_empty(), "retyping re-scrambles");
+
+        let loaded = storage::load(&app.data_path).expect("retyping persists");
+        let session = loaded
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .expect("the retyped session survives");
+        assert_eq!(session.puzzle, Puzzle::Skewb);
     }
 
     #[test]
@@ -1517,7 +1714,11 @@ mod tests {
 
         run_command(&mut app, "new");
         assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
-        assert_eq!(app.current_session().id, FIRST_USER_ID, "user ids start at 7");
+        assert_eq!(
+            app.current_session().id,
+            FIRST_USER_ID,
+            "user ids start above the defaults"
+        );
         assert_eq!(app.current_session().name, "session 2");
         assert_eq!(app.current_session().puzzle, Puzzle::Cube3);
         assert!(app.current_session().solves.is_empty());
@@ -1831,7 +2032,7 @@ mod tests {
     }
 
     #[test]
-    fn new_restores_the_six_defaults_and_keeps_user_sessions() {
+    fn new_restores_the_eleven_defaults_and_keeps_user_sessions() {
         let save = SaveFile {
             next_session_id: 2,
             sessions: vec![
@@ -1861,10 +2062,15 @@ mod tests {
         let (app, _g) = test_app_with("ctor-defaults", save);
 
         let ids: Vec<u64> = app.save.sessions.iter().map(|s| s.id).collect();
-        assert_eq!(ids, vec![1, 2, 3, 4, 5, 6, 12], "defaults exist and sort first");
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            "defaults exist and sort first"
+        );
         assert_eq!(app.save.sessions[0].solves.len(), 1, "existing solves survive");
         assert_eq!(app.save.sessions[3].puzzle, Puzzle::Cube5, "id 4 is the 5x5 default");
-        assert_eq!(app.save.sessions[6].name, "evening");
+        assert_eq!(app.save.sessions[6].puzzle, Puzzle::Pyraminx, "id 7 is Pyraminx");
+        assert_eq!(app.save.sessions[11].name, "evening");
         assert_eq!(app.save.next_session_id, 13, "past every id in use");
         assert_eq!(app.save.active_session_id, 1, "a dangling active id falls back to 3x3");
     }
@@ -1879,6 +2085,272 @@ mod tests {
         assert_eq!(app.current_session().puzzle, Puzzle::Cube2);
         let moves = app.scramble.split_whitespace().count();
         assert!((9..=11).contains(&moves), "2x2 scramble was {moves} moves");
+    }
+
+    #[test]
+    fn new_renumbers_sessions_that_share_an_id() {
+        // Three sessions all claiming id 12: only the first may keep it.
+        let dup = |name: &str, puzzle: Puzzle, millis: u64| Session {
+            id: 12,
+            name: name.to_string(),
+            puzzle,
+            solves: vec![Solve {
+                millis,
+                penalty: Penalty::None,
+                scramble: "R U".to_string(),
+                timestamp: 1,
+            }],
+            created_at: 1,
+        };
+        let save = SaveFile {
+            next_session_id: 12,
+            sessions: vec![
+                dup("first", Puzzle::Cube3, 9_000),
+                dup("second", Puzzle::Cube2, 3_000),
+                dup("third", Puzzle::Skewb, 7_000),
+            ],
+            active_session_id: 12,
+            ..SaveFile::default()
+        };
+        let (app, _g) = test_app_with("ctor-dupes", save);
+
+        let ids: Vec<u64> = app.save.sessions.iter().map(|s| s.id).collect();
+        assert_eq!(ids, (1..=14).collect::<Vec<u64>>(), "every id is distinct");
+        let named: Vec<(u64, &str)> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.id >= FIRST_USER_ID)
+            .map(|s| (s.id, s.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![(12, "first"), (13, "second"), (14, "third")],
+            "the first occurrence keeps the id, the rest move up in order"
+        );
+        for session in app.save.sessions.iter().filter(|s| s.id >= FIRST_USER_ID) {
+            assert_eq!(session.solves.len(), 1, "renumbering keeps the solves");
+        }
+        assert_eq!(app.save.next_session_id, 15, "past every id now in use");
+        assert_eq!(app.save.active_session_id, 12, "the surviving id 12 stays active");
+    }
+
+    #[test]
+    fn new_evicts_a_session_squatting_on_another_puzzles_reserved_id() {
+        // Id 9 is Megaminx's, but this file parked a 4x4 session there.
+        let save = SaveFile {
+            next_session_id: 12,
+            sessions: vec![Session {
+                id: 9,
+                name: "misfiled".to_string(),
+                puzzle: Puzzle::Cube4,
+                solves: vec![Solve {
+                    millis: 7_000,
+                    penalty: Penalty::None,
+                    scramble: "R U".to_string(),
+                    timestamp: 1,
+                }],
+                created_at: 5,
+            }],
+            active_session_id: 9,
+            ..SaveFile::default()
+        };
+        let (app, _g) = test_app_with("ctor-squatter", save);
+
+        let nine = app
+            .save
+            .sessions
+            .iter()
+            .find(|s| s.id == 9)
+            .expect("id 9 exists again");
+        assert_eq!(nine.puzzle, Puzzle::Megaminx, "the proper default is recreated");
+        assert_eq!(nine.name, "default");
+        assert!(nine.solves.is_empty());
+
+        let moved = app
+            .save
+            .sessions
+            .iter()
+            .find(|s| s.name == "misfiled")
+            .expect("the squatter survives");
+        assert_eq!(moved.id, FIRST_USER_ID, "it moves to a fresh user id");
+        assert_eq!(moved.puzzle, Puzzle::Cube4, "with its puzzle and solves intact");
+        assert_eq!(moved.solves.len(), 1);
+        assert_eq!(
+            app.save.active_session_id,
+            FIRST_USER_ID,
+            "the active id follows the session it pointed at"
+        );
+        assert_eq!(app.current_session().puzzle, Puzzle::Cube4);
+    }
+
+    #[test]
+    fn new_evicts_a_session_holding_an_id_no_puzzle_reserves() {
+        // Zero is not a legal id, so the session is renumbered out of the reserved range.
+        let save = SaveFile {
+            next_session_id: 1,
+            sessions: vec![Session {
+                id: 0,
+                name: "zero".to_string(),
+                puzzle: Puzzle::Clock,
+                solves: Vec::new(),
+                created_at: 1,
+            }],
+            active_session_id: 0,
+            ..SaveFile::default()
+        };
+        let (app, _g) = test_app_with("ctor-zero", save);
+        assert!(
+            app.save.sessions.iter().all(|s| s.id > 0),
+            "no session keeps id 0"
+        );
+        let moved = app
+            .save
+            .sessions
+            .iter()
+            .find(|s| s.name == "zero")
+            .expect("the session survives");
+        assert!(moved.id >= FIRST_USER_ID);
+        assert_eq!(app.save.active_session_id, moved.id);
+    }
+
+    // ------------------------------------------------------- derived statistics
+
+    /// Assert the cached statistics still equal a fresh computation over the same data.
+    fn assert_cache_is_fresh(app: &App, when: &str) {
+        let fresh = stats::session_stats(&app.current_session().solves);
+        assert_eq!(app.stats, fresh, "app.stats went stale {}", when);
+
+        let puzzle = app.current_session().puzzle;
+        let of_puzzle: Vec<&Session> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.puzzle == puzzle)
+            .collect();
+        assert_eq!(
+            app.pbs,
+            stats::personal_bests(&of_puzzle),
+            "app.pbs went stale {}",
+            when
+        );
+    }
+
+    /// Record a solve through the real path, then clear the guards a user clears by waiting.
+    fn perform_solve(app: &mut App) {
+        start_timing_now(app);
+        app.on_key(press(KeyCode::Char('x')));
+        app.on_key(release(KeyCode::Char('x')));
+        app.stopped_at = None;
+    }
+
+    #[test]
+    fn the_stats_cache_starts_fresh_and_follows_every_solve() {
+        let (mut app, _g) = test_app("cache-solve");
+        assert_cache_is_fresh(&app, "on a brand new app");
+        assert_eq!(app.stats.count, 0);
+
+        for n in 1..=6 {
+            perform_solve(&mut app);
+            assert_eq!(app.stats.count, n, "the cache counts every solve");
+            assert_cache_is_fresh(&app, "after finishing a solve");
+        }
+        assert!(
+            matches!(app.stats.ao5, crate::stats::AvgResult::Time(_)),
+            "six solves is enough for an ao5, got {:?}",
+            app.stats.ao5
+        );
+        assert!(app.pbs.single.is_some(), "a solve sets a PB single");
+    }
+
+    #[test]
+    fn the_stats_cache_follows_a_penalty_change() {
+        let (mut app, _g) = test_app("cache-penalty");
+        add_solve(&mut app, 10_000);
+        add_solve(&mut app, 20_000);
+        run_command(&mut app, "ok"); // Any penalty command re-derives the cache.
+        assert_cache_is_fresh(&app, "after seeding solves");
+        assert_eq!(app.stats.worst, Some(20_000));
+
+        run_command(&mut app, "+2");
+        assert_eq!(app.stats.worst, Some(22_000), "+2 lands in the cache");
+        assert_cache_is_fresh(&app, "after /+2");
+
+        run_command(&mut app, "dnf");
+        assert_eq!(app.stats.valid_count, 1, "a DNF drops out of the valid count");
+        assert_eq!(app.stats.worst, Some(10_000));
+        assert_cache_is_fresh(&app, "after /dnf");
+
+        run_command(&mut app, "ok");
+        assert_eq!(app.stats.worst, Some(20_000));
+        assert_cache_is_fresh(&app, "after /ok");
+    }
+
+    #[test]
+    fn the_stats_cache_follows_a_deletion() {
+        let (mut app, _g) = test_app("cache-delete");
+        for ms in [10_000, 11_000, 30_000] {
+            add_solve(&mut app, ms);
+        }
+        run_command(&mut app, "del");
+        assert_eq!(app.stats.count, 2, "the deleted solve leaves the cache");
+        assert_eq!(app.stats.worst, Some(11_000));
+        assert_cache_is_fresh(&app, "after /del");
+
+        // A second session of the same puzzle holds the PB, so deleting it must move the PB.
+        run_command(&mut app, "new fast");
+        for ms in [1_000, 1_100, 1_200, 1_300, 1_400] {
+            add_solve(&mut app, ms);
+        }
+        run_command(&mut app, "del");
+        assert_eq!(app.pbs.single, Some(1_000));
+        assert_cache_is_fresh(&app, "in the second session");
+
+        run_command(&mut app, "delsession");
+        assert_eq!(app.pbs.single, Some(10_000), "the fast session's PB is gone");
+        assert_cache_is_fresh(&app, "after /delsession");
+    }
+
+    #[test]
+    fn the_stats_cache_follows_a_session_switch() {
+        let (mut app, _g) = test_app("cache-switch");
+        add_solve(&mut app, 10_000);
+        run_command(&mut app, "ok");
+        assert_eq!(app.stats.count, 1);
+
+        run_command(&mut app, "new evening");
+        assert_eq!(app.stats.count, 0, "a new session starts with no stats");
+        assert_cache_is_fresh(&app, "after /new");
+
+        run_command(&mut app, "session 1");
+        assert_eq!(app.stats.count, 1, "switching back restores the 3x3 stats");
+        assert_cache_is_fresh(&app, "after /session 1");
+
+        run_command(&mut app, "2x2");
+        assert_eq!(app.stats.count, 0, "2x2 has its own empty default");
+        assert_eq!(app.pbs.single, None, "and its own PBs");
+        assert_cache_is_fresh(&app, "after /2x2");
+
+        run_command(&mut app, "3x3");
+        assert_eq!(app.stats.count, 1);
+        assert_cache_is_fresh(&app, "after /3x3");
+    }
+
+    #[test]
+    fn the_stats_cache_follows_retyping_an_empty_session() {
+        let (mut app, _g) = test_app("cache-retype");
+        add_solve(&mut app, 10_000);
+        run_command(&mut app, "ok");
+
+        // An empty user session retypes in place, which changes which sessions the PBs span.
+        run_command(&mut app, "new scratch");
+        assert_cache_is_fresh(&app, "in the new 3x3 session");
+        assert_eq!(app.pbs.single, Some(10_000), "3x3 PBs still include the default");
+
+        run_command(&mut app, "megaminx");
+        assert_eq!(app.current_session().puzzle, Puzzle::Megaminx, "retyped in place");
+        assert_eq!(app.pbs.single, None, "Megaminx has no times yet");
+        assert_cache_is_fresh(&app, "after retyping onto Megaminx");
     }
 
     #[test]
