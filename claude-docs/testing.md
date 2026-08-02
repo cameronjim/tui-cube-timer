@@ -44,37 +44,48 @@ directly.
 A test lives with its subject, which means a split moves tests as well as code. Where two
 files inside one directory need the same scaffolding, it goes in a `#[cfg(test)] mod
 testkit` beside them: `app/testkit.rs` holds `TempPath`, `test_app`, `press`, `release`,
-`run_command`, `perform_solve` and friends for all four files of `app/`, and a private `mod
+`run_command`, `perform_solve` and friends for all five files of `app/`, and a private `mod
 testkit` at the bottom of `ui/mod.rs` holds `app_with`, `render` and `render_all` for all
 three renderers. Never duplicate a helper across sibling files.
 
-Current state, 320 tests, all green:
+Current state, 370 tests, all green:
 
 | Module | Tests | Focus |
 |---|---|---|
 | `stats.rs` | 46 | Trimmed averages, penalties, session stats, personal bests |
-| `app/mod.rs` | 41 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
-| `ui/layout.rs` | 35 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing |
-| `app/commands.rs` | 33 | Every `/command`, its arguments, its refusals and its persistence |
+| `app/commands.rs` | 49 | Every `/command`, its arguments, its refusals, its persistence, the export and import round trip |
+| `app/mod.rs` | 43 | State machine, keys, inspection and judge calls, the stop guards, the derived cache |
+| `ui/layout.rs` | 40 | Panel heights, word wrap, the header cap, popup packing, list windows, stats packing, the trend popup's bounds |
 | `storage.rs` | 31 | Round trips, atomic write, missing versus corrupt files, the size cap, every migration |
-| `app/selection.rs` | 20 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
+| `app/selection.rs` | 21 | The times cursor, the solve-detail overlay, the sessions picker and its modality |
 | `types.rs` | 16 | `format_millis`, `format_solve`, penalty arithmetic at `u64::MAX` |
 | `scramble/square1.rs` | 16 | The shape simulator, twist range, slash legality, replay |
+| `cstimer.rs` | 16 | The export shape, the penalty encoding, a round trip, a handcrafted csTimer file, the skips, the errors |
+| `ui/mod.rs` | 11 | Render smoke at four sizes, the chrome anchor, the stats prefix column and its packing |
 | `scramble/pyraminx.rs` | 12 | Layer count, the repeat rule, tip order and frequency |
 | `scramble/clock.rs` | 12 | The fifteen-token frame, amount range and uniformity |
-| `ui/mod.rs` | 10 | Render smoke at four sizes, the chrome anchor, the stats prefix column |
+| `app/progress.rs` | 12 | The trend window and its refreshes, which solves raise the banner and when it comes down |
+| `ui/overlay.rs` | 19 | All four popups at four sizes, clamping, the cursor, which one wins, the trend graph's glyphs and y domain |
 | `scramble/megaminx.rs` | 9 | Line and move counts, the derived closing `U` |
-| `ui/overlay.rs` | 9 | All three popups at four sizes, clamping, the cursor, which one wins |
+| `ui/timer.rs` | 8 | The block font, `hide_time`, the stage colours and captions, penalty precedence, the personal-best banner |
 | `scramble/skewb.rs` | 8 | Pool, length, the no-repeat rule, successor fairness |
 | `scramble/cube.rs` | 8 | Move pools, lengths, the legality rule, determinism |
 | `app/repair.rs` | 5 | A broken save file: missing defaults, duplicate ids, misfiled reserved ids |
 | `scramble/mod.rs` | 5 | Every puzzle dispatches, is non-empty and is seed-stable |
-| `ui/timer.rs` | 4 | The block font, `hide_time`, the stage colours and captions, penalty precedence |
 
 The tests in `scramble/mod.rs` are worth their line count out of proportion to their size:
 each loops over `Puzzle::ALL`, so adding a thirteenth event without writing a generator for
 it fails immediately rather than shipping an empty scramble. `ui/mod.rs` does the same
-thing, rendering every puzzle at every size.
+thing, rendering every puzzle at every size, and so does
+`cstimer::every_event_exports_a_scramble_type_that_imports_back_to_it`, which fails the
+moment an event is added without a csTimer scramble type to carry it.
+
+`cstimer.rs` is tested from both ends, and both are needed. A round trip, `export` then
+`import`, proves nothing was lost in Cubetimer's own writing, but it would pass just as
+happily if both directions agreed on a format csTimer does not use. So the import tests
+also run against a fixture built to the shape csTimer actually writes, string-encoded
+`sessionData` included, with a blindfolded session in it to assert the skip and a session
+naming no scramble type to assert the default.
 
 ## Testing pure logic
 
@@ -271,9 +282,14 @@ nothing cannot pass the whole file.
 A handful of tests go past the anchor, and they are the ones where a wrong cell means a
 wrong reading rather than an ugly one: `cells_colored` and `row_cells` let `ui/timer.rs`
 assert that stage 1 recolours the countdown *and* draws `8s` in that same colour, and that a
-`+2` takes the slot and the red back off it; `rows_of` lets `ui/mod.rs` assert the three
-stats rows start their values in the same column. Colour and column alignment carry meaning
-here, so they are asserted directly. Beyond those, content is not asserted.
+`+2` takes the slot and the red back off it, and that a personal-best banner turns the
+digits under it light green while a running inspection is left alone; `rows_of` lets
+`ui/mod.rs` assert the three stats rows start their values in the same column. `ui/overlay.rs`
+goes furthest, because the trend graph is the one widget whose glyphs are a compatibility
+contract: it sweeps every cell inside the popup border and fails on anything that is neither
+ASCII nor one of the six CP437 characters the chart is allowed to draw. Colour, column
+alignment and that glyph set carry meaning here, so they are asserted directly. Beyond those,
+content is not asserted.
 
 Full snapshot testing of the buffer is still declined. The churn cost on a UI that is still
 moving is higher than the bug rate it would catch, and the pieces where a wrong value would

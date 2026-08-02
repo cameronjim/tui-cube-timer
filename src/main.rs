@@ -1,6 +1,7 @@
 //! cubetimer, a speedcube timer TUI.
 
 mod app;
+mod cstimer;
 mod scramble;
 mod stats;
 mod storage;

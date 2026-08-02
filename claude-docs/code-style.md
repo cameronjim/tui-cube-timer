@@ -6,11 +6,11 @@ says otherwise.
 
 ## Module boundaries
 
-Each of the seven modules owns exactly one concern, and the dependency arrows only point
+Each of the eight modules owns exactly one concern, and the dependency arrows only point
 one way:
 
 ```
-main.rs  ->  app/   ->  scramble/, stats.rs, storage.rs, types.rs
+main.rs  ->  app/   ->  cstimer.rs, scramble/, stats.rs, storage.rs, types.rs
 main.rs  ->  ui/    ->  app/ (read-only), types.rs
 ```
 
@@ -19,10 +19,17 @@ outgrew one file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per 
 family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
 block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
 geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
-command mode, `app/selection.rs` owns the times cursor and the two list overlays, and
-`app/repair.rs` repairs a save file. A directory is still one module for the purposes of
-this document: the boundary rules below apply to `ui/` as a whole, not to each file inside
-it, and the same goes for `app/`.
+command mode, `app/selection.rs` owns the times cursor and all four overlays,
+`app/progress.rs` owns the trend and the personal-best celebration, and `app/repair.rs`
+repairs a save file. A directory is still one module for the purposes of this document: the
+boundary rules below apply to `ui/` as a whole, not to each file inside it, and the same
+goes for `app/`.
+
+`cstimer.rs` is the newest of the eight and shows the shape a pure module should keep:
+`export` takes a `&SaveFile` and returns a `String`, `import` takes a `&str` and returns
+sessions, and neither opens a file or knows what an id is. The commands that call it do the
+IO through the same paths every other write uses. A converter that wrote its own file would
+have put a second answer to "where does data live" in the crate.
 
 `types.rs` sits at the bottom and depends on nothing but `serde`. Its module doc says so
 out loud: keep it dependency-light. Anything that grows a dependency there ripples through
@@ -112,26 +119,33 @@ and touches neither `Frame` nor `App`, which turned the degradation rules from s
 checked by eye into ordinary unit tests. `app/` divides by question asked: `repair.rs`
 answers "is this save file internally consistent" as free functions over `&mut SaveFile`,
 `commands.rs` owns command mode behind the single `on_command_key` entry point,
-`selection.rs` owns which solve or session you are pointing at, which the timer never asks,
-and `mod.rs` keeps the state machine. Every one of those splits made the code more testable,
-which is the sign you cut in the right place.
+`selection.rs` owns which solve or session you are pointing at and which overlay is up,
+neither of which the timer asks,
+`progress.rs` owns how the session is going, which is the trend and the personal-best
+celebration, and `mod.rs` keeps the state machine. Every one of those splits made the code
+more testable, which is the sign you cut in the right place.
 
 Two habits make a split of this kind cheap. First, the public surface does not move: `App`,
 `TimerState` and `InputMode` are still `crate::app::*`, so `main.rs` and `ui` never learned
 that `app` became a directory. Second, tests move with their subject, and the scaffolding
 they share moves to a `#[cfg(test)] mod testkit` beside them rather than being duplicated.
 
-A third habit is worth naming from the two splits that produced `app/selection.rs` and
-`ui/timer.rs`: the parent keeps one entry point per cluster and the child keeps everything
-behind it. `on_key_idle` hands its cursor keys to `selection::on_key_times` rather than
-importing `TIMES_PAGE` back out, and `draw_body` calls `timer::draw_timer` rather than
-knowing what `GLYPH_H` is. A constant that has to travel back up to the parent is a sign the
-cut was made one function too deep.
+A third habit is worth naming from the splits that produced `app/selection.rs`,
+`ui/timer.rs` and `app/progress.rs`: the parent keeps one entry point per cluster and the
+child keeps everything behind it. `on_key_idle` hands its cursor keys to
+`selection::on_key_times` rather than importing `TIMES_PAGE` back out, `draw_body` calls
+`timer::draw_timer` rather than knowing what `GLYPH_H` is, and `on_tick` calls
+`expire_pb_banner` rather than knowing that the banner lasts five seconds. A constant that
+has to travel back up to the parent is a sign the cut was made one function too deep.
 
-No file in `src/` is over the line now. The largest are `app/mod.rs` at 475 non-test lines
-and `ui/mod.rs` at 367; the next candidates below them are `storage.rs` at 345 and
-`app/commands.rs` at 303, and none of the four has a seam worth cutting yet. Treat growth
-past roughly 500 in any of them as the prompt to look again.
+No file in `src/` is over the line now, but one is close enough to name. `app/mod.rs` is at
+493 non-test lines after the trend, the personal-best banner and the overlay toggles moved
+out to `app/progress.rs` and `app/selection.rs`, which is under 500 with nothing to spare;
+the next cut there is the inspection cluster, meaning the five `INSPECTION_*` constants with
+`start_inspection`, `cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind
+them. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391, `ui/mod.rs` at 380,
+`cstimer.rs` at 372 and `storage.rs` at 345, none of which has a seam worth cutting yet.
+Treat growth past roughly 500 in any of them as the prompt to look again.
 
 ## Comments
 

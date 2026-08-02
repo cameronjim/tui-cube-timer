@@ -36,6 +36,21 @@ const SESSIONS_FIXED_ROWS: usize = 3;
 
 /// Entries kept above the cursor in a scrolling list while it moves down.
 const LIST_LEAD: usize = 2;
+/// Text rows the stats strip has always had: the rolling averages, the session spread, the bests.
+pub(super) const STAT_ROWS: u16 = 3;
+/// Height of the stats block without a sparkline in it: its text rows and the two borders.
+pub(super) const STATS_H: u16 = STAT_ROWS + 2;
+/// Widest the trend popup grows; past this the graph stretches without reading any better.
+const TREND_W: u16 = 72;
+/// Tallest the trend popup grows.
+const TREND_H: u16 = 22;
+/// Narrowest the trend popup is worth drawing at: the y axis labels and a run of line beside them.
+const TREND_MIN_W: u16 = 40;
+/// Shortest the trend popup is worth drawing at: three y ticks, the x labels and the hint.
+const TREND_MIN_H: u16 = 12;
+/// Rows and columns the trend popup leaves around itself on a terminal larger than it needs.
+const TREND_MARGIN: u16 = 4;
+
 /// Columns between two entries of a stats row; the renderer inserts exactly this many.
 pub(super) const STAT_SEP: usize = 3;
 /// Columns the prefix column of a stats row is padded to, so all three rows line up under it.
@@ -175,6 +190,32 @@ pub(super) fn list_window(selected: usize, total: usize, rows: usize) -> (usize,
         start = selected.saturating_sub(rows - 1);
     }
     (start, rows.min(total - start))
+}
+
+/// Height of the stats block; zero once the left column has nothing to spare for it.
+///
+/// The strip is all or nothing, and the timer's [`TIMER_MIN_H`] rows come first, so a column
+/// that cannot hold both keeps the big digits and drops the numbers.
+pub(super) fn stats_height(left_h: u16) -> u16 {
+    if left_h < STATS_H.saturating_add(TIMER_MIN_H) {
+        return 0;
+    }
+    STATS_H
+}
+
+/// Where the trend popup sits, or `None` on a terminal with no room for a readable graph.
+///
+/// It grows to the terminal less [`TREND_MARGIN`] on each axis, capped at [`TREND_W`] by
+/// [`TREND_H`], because a line graph reads better the more of both it is given. Below
+/// [`TREND_MIN_W`] by [`TREND_MIN_H`] the axis labels and the hint would leave nothing for the
+/// line, so the popup is skipped rather than drawn as a frame around three cells.
+pub(super) fn trend_popup(area: Rect) -> Option<Rect> {
+    let width = area.width.saturating_sub(TREND_MARGIN).min(TREND_W);
+    let height = area.height.saturating_sub(TREND_MARGIN).min(TREND_H);
+    if width < TREND_MIN_W || height < TREND_MIN_H {
+        return None;
+    }
+    Some(centered(width, height, area))
 }
 
 /// Columns a stats row has left for its entries once the prefix column and its space are taken.
@@ -501,6 +542,81 @@ mod tests {
     fn fit_count_survives_absurd_widths() {
         assert_eq!(fit_count(&[usize::MAX, 1], u16::MAX), 1);
         assert_eq!(fit_count(&[1, usize::MAX], u16::MAX), 1);
+    }
+
+    // ---- the stats block
+
+    #[test]
+    fn the_stats_strip_appears_exactly_where_it_always_has() {
+        // Twelve rows is five for the strip and seven for the block font, and not one fewer.
+        assert_eq!(stats_height(11), 0);
+        assert_eq!(stats_height(12), STATS_H);
+        assert_eq!(
+            stats_height(60),
+            STATS_H,
+            "and the block never grows past its three rows"
+        );
+    }
+
+    #[test]
+    fn the_stats_block_never_squeezes_the_timer_below_its_glyph_rows() {
+        for height in 0..60u16 {
+            let stats = stats_height(height);
+            assert!(
+                stats == 0 || height.saturating_sub(stats) >= TIMER_MIN_H,
+                "a {}-row column gave {} to the stats and left the timer {}",
+                height,
+                stats,
+                height.saturating_sub(stats)
+            );
+        }
+    }
+
+    // ---- trend popup
+
+    #[test]
+    fn the_trend_popup_grows_to_the_terminal_and_stops_at_its_cap() {
+        // Eighty by thirty leaves the margin on both axes and still clears the cap on width.
+        let popup = trend_popup(rect(80, 30)).expect("a comfortable terminal holds the graph");
+        assert_eq!((popup.width, popup.height), (TREND_W, TREND_H));
+        assert_eq!((popup.x, popup.y), (4, 4), "and it is centered");
+
+        // Below the cap it takes what it is given, less the margin.
+        let popup = trend_popup(rect(60, 20)).expect("a smaller terminal still holds it");
+        assert_eq!((popup.width, popup.height), (56, 16));
+
+        let popup = trend_popup(rect(200, 90)).expect("a large terminal is capped");
+        assert_eq!((popup.width, popup.height), (TREND_W, TREND_H));
+    }
+
+    #[test]
+    fn the_trend_popup_is_skipped_on_a_terminal_it_could_not_be_read_on() {
+        // The minimum plus the margin is the smallest terminal that draws it at all.
+        assert!(trend_popup(rect(TREND_MIN_W + TREND_MARGIN, TREND_MIN_H + TREND_MARGIN)).is_some());
+        assert_eq!(trend_popup(rect(TREND_MIN_W + TREND_MARGIN - 1, 40)), None);
+        assert_eq!(trend_popup(rect(80, TREND_MIN_H + TREND_MARGIN - 1)), None);
+        for (w, h) in [(0u16, 0u16), (1, 1), (10, 4), (30, 8), (44, 12)] {
+            assert_eq!(trend_popup(rect(w, h)), None, "{}x{} is too small", w, h);
+        }
+    }
+
+    #[test]
+    fn the_trend_popup_always_fits_the_terminal_it_is_drawn_on() {
+        for w in 0..120u16 {
+            for h in 0..60u16 {
+                let Some(popup) = trend_popup(rect(w, h)) else {
+                    continue;
+                };
+                assert!(
+                    popup.x + popup.width <= w && popup.y + popup.height <= h,
+                    "{:?} escapes {}x{}",
+                    popup,
+                    w,
+                    h
+                );
+                assert!(popup.width >= TREND_MIN_W && popup.height >= TREND_MIN_H);
+            }
+        }
     }
 
     // ---- solve detail popup

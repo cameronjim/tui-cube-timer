@@ -2,9 +2,10 @@
 
 This document covers the maths Cubetimer implements: WCA trimmed averages, untrimmed means,
 rolling bests and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`),
-and the inspection penalty thresholds and judge calls (`src/app/mod.rs`). Every claim here
-describes the code as it stands, including the places where Cubetimer approximates the
-official rules rather than matching them.
+the inspection penalty thresholds and judge calls (`src/app/mod.rs`), and the csTimer
+interchange format (`src/cstimer.rs`). Every claim here describes the code as it stands,
+including the places where Cubetimer approximates the official rules rather than matching
+them.
 
 For how these pieces fit into the program, see [architecture.md](architecture.md).
 Project-level guidance is in [../CLAUDE.md](../CLAUDE.md); code style rules are in
@@ -265,6 +266,42 @@ matching the active session's puzzle, which is what makes the cached PBs event-s
 Combined with the puzzle-retype rule in [architecture.md](architecture.md), which prevents
 a session that already has solves from changing puzzle, this guarantees no personal best
 ever mixes events.
+
+### What the trend plots
+
+`app::progress::trend_of` is the one derived series that is not a statistic. It takes the
+last 50 solves of the active session and keeps their `effective_millis()`, so what the
+`/trend` graph draws is the time each solve actually cost: a `+2` plots two seconds higher
+than the stopwatch said, and a DNF, having no effective time, is not plotted at all.
+Nothing is substituted for it, so the series is shorter than the window whenever a DNF is
+in range and a run of them simply leaves fewer points. The series is oldest first and
+unsmoothed, and y is a time rather than a score, which makes a dip a fast solve.
+
+`ui::overlay::trend_plot` turns that series into the points and the two axis bounds the
+chart is given. x is a solve's index in the window, and the whole window is plotted
+whatever the popup's width, because a line stays a line when two solves land in the same
+column and dropping the oldest to avoid that would make the x axis lie.
+
+The y axis spans the window and not zero. Its floor is the window minimum, and its ceiling
+is `trend_top`, the window's 95th percentile by nearest rank rather than its maximum:
+`rank = ceil(0.95 n)`, held below `n` once `n >= TREND_TRIM_MIN` (5). Values above the
+ceiling are clamped onto it before they are handed to the chart. Two separate problems are
+being solved there. Solve times cluster in a band far away from zero, so scaling from zero
+draws every session as one flat line near the top of the graph, and scaling to the window's
+own range spends the whole height on the spread that is actually there. Scaling to the
+window's *maximum* then re-introduces the same failure whenever one solve is wrecked: a
+single 60 second solve among twelve second ones crushes the other forty nine onto the
+bottom row. Pinning the ceiling below the slowest solve costs exactly one distinction, the
+one between the slowest and the next slowest, and buys the whole of the range under it.
+Plain nearest rank does not do that on its own, because `ceil(0.95 n)` is `n` for every
+`n` under twenty, which is the length at which one bad solve does the most damage, hence
+the second clamp. Under five solves there is nothing to call an outlier and the ceiling is
+the maximum.
+
+A window whose ceiling equals its minimum has no range to spread over. It is drawn against
+`[min - TREND_FLAT_PAD, min + TREND_FLAT_PAD]`, which puts the flat line half way up
+instead of dividing by zero, and a single solve is duplicated at x = 1 so it draws as the
+flat line it is rather than as a dot in the corner.
 
 ---
 
@@ -730,6 +767,116 @@ The penalty display still wins over the stage. Once `inspection_remaining` reach
 below, `timer_view` paints the countdown plain red and puts `+2` or `DNF` in the caption
 slot instead of the call, so an earned penalty is never mistaken for a warning that has cost
 nothing yet.
+
+---
+
+## The csTimer interchange format
+
+`src/cstimer.rs` converts between `SaveFile` and the JSON csTimer exports, in both
+directions and with no file handling of its own. The shape below was read off csTimer's
+source and checked against a file csTimer wrote, because the two places it is
+counter-intuitive, the penalty encoding and the string-inside-string nesting, are exactly
+the places a guess would be wrong.
+
+**The export is named `cstimer_YYYYMMDD_HHMMSS.txt` and the extension is not cosmetic.**
+csTimer's import is `<input type="file" accept="text/*">`, and Windows calls a `.json` file
+`application/json`, so a `.json` export is one the picker refuses to show. `default_file_name`
+builds the name from `types::format_timestamp`, which is UTC and prints no seconds, so it
+reduces that to its digits and takes the seconds off the clock itself; a clock far enough
+off to print a year outside four digits falls back to `cstimer_export.txt` rather than a
+malformed name.
+
+The top level is an object holding one `session<n>` key per session, numbered from 1, beside
+a `properties` object:
+
+```json
+{
+  "session1": [ [[0, 12340], "R U R' U'", "", 1700000000] ],
+  "properties": {
+    "sessionN": 1,
+    "session": 1,
+    "sessionData": "{\"1\":{\"name\":\"main\",\"opt\":{\"scrType\":\"333\"},\"rank\":1,\"stat\":[1,0,12340],\"date\":[1700000000,1700000000]}}"
+  }
+}
+```
+
+`properties` is csTimer's whole settings object and an import replaces it wholesale, which
+is why an export of ours puts csTimer's own preferences back to their defaults: only the
+three session keys above are written, and inventing values for the rest would be worse than
+leaving them out. `sessionN` is the one that has to be right, because csTimer's importer
+reads `session1` through `sessionN` and nothing past it. A file csTimer wrote can carry
+neither `sessionN` nor `session`, because it omits any property still holding its default,
+so their absence is not a sign they are optional for us.
+
+**One solve is a four-element tuple**, `[[penalty, millis], scramble, comment, timestamp]`:
+
+| Slot | Holds |
+| --- | --- |
+| `penalty` | 0 clean, 2000 for a `+2`, -1 for a DNF |
+| `millis` | The **raw** time, with no penalty folded into it |
+| `scramble` | The scramble string, or an empty one |
+| `comment` | A per-solve note csTimer supports and Cubetimer does not; exported empty, ignored on import |
+| `timestamp` | Unix time in **seconds**, not milliseconds |
+
+The penalty column is the subtlety. The 2000 of a `+2` is a marker rather than an addend:
+csTimer stores the raw time beside it and adds the two seconds when it displays the result,
+which is exactly what `Solve::effective_millis` does, so `export_solve` writes `solve.millis`
+untouched and `import_solve` reads it back untouched. Folding the 2000 in would double it on
+the next read. A DNF keeps the time it would have been under a `-1`, so nothing is lost by
+marking a solve DNF in one program and clearing it in the other.
+
+Two smaller rules follow from the format being another program's: any positive penalty is
+legal in csTimer, so an unfamiliar one is added into the time on import and the total still
+reads correctly, and a time written as a float, which converters that build these files
+from text exports produce, is rounded rather than refused. Timestamps are divided by 1000
+on the way out and multiplied by 1000 on the way in, so a round trip is exact to the
+second and loses only the milliseconds beneath it.
+
+**`sessionData` is a JSON-encoded string, not an object.** It maps each session index to
+its `name`, its `rank` and its `opt.scrType`, and `properties` itself is sometimes stored
+the same way. A session csTimer has opened also carries `stat`, which is
+`[solves, DNFs, mean]`, and `date`, which is the first and last solve in Unix seconds.
+Neither is load bearing, csTimer recomputes both the moment the session is opened, but its
+session manager lists a session by them before anything opens it, so `session_summary`
+writes both for any session with solves and neither for an empty one, exactly as csTimer
+does. The mean is over `effective_millis` truncated to hundredths, which is how csTimer
+averages what it displays, and it is -1 when every solve is a DNF. Both are decoded through one `as_object` helper that accepts either form, as
+are the `session<n>` solve lists, so files written by older csTimer versions and by
+third-party converters all parse. `scr` is accepted as a fallback for `opt.scrType`,
+which is where the scramble type sat before csTimer moved it.
+
+`scrType` is the event, and the mapping is asymmetric on purpose. Export writes the one WCA
+type per event; import accepts that type and the whole-puzzle variants beside it, so a
+session someone kept on a non-WCA scrambler still lands on the right event:
+
+| Event | Exported as | Also imported from |
+| --- | --- | --- |
+| 3x3 | `333` | `333o`, `333noob` |
+| 3x3 one-handed | `333oh` | |
+| 2x2 | `222so` | `222o`, `2223`, `222nb` |
+| 4x4 | `444wca` | `444m`, `444`, `444yj` |
+| 5x5 | `555wca` | `555` |
+| 6x6 | `666wca` | `666si`, `666p`, `666s` |
+| 7x7 | `777wca` | `777si`, `777p`, `777s` |
+| Pyraminx | `pyrso` | `pyro`, `pyrm`, `pyrnb` |
+| Skewb | `skbso` | `skbo`, `skb`, `skbnb` |
+| Megaminx | `mgmp` | `mgmc`, `mgmo`, `mgmso` |
+| Square-1 | `sqrs` | `sq1h`, `sq1t` |
+| Clock | `clkwca` | `clkwcab`, `clknf`, `clk`, `clko`, `clkc`, `clke` |
+
+One-handed is `333oh` rather than `333`, which is what keeps a one-handed session from
+merging into two-handed times when the file travels. A test walks `Puzzle::ALL` and asserts
+every event survives its own scramble type, so a thirteenth event cannot be added without
+one.
+
+**Anything else is skipped, not guessed.** Every case trainer, every blindfolded type,
+fewest moves, and every puzzle Cubetimer has no event for produce no session and increment
+`Import::skipped`, which the status line reports. Filing 3x3 blindfolded solves under 3x3
+would put minute-long times into an ao12 that never meant to hold them, and a session
+quietly absorbed into the wrong event is harder to notice, and to undo, than one that never
+arrived. A session whose solve list cannot be read at all is skipped the same way, while a
+single unreadable solve inside a readable list is dropped and the rest of the session is
+kept. A session naming no scramble type at all is 3x3, which is csTimer's own default.
 
 ---
 
