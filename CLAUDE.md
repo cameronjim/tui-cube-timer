@@ -47,7 +47,7 @@ Three of those are directories, each split along its own internal seam:
 | `app/repair.rs` | Save-file structural repair: `sanitize` and the id bookkeeping under it |
 | `app/testkit.rs` | Test scaffolding shared by the three, `#[cfg(test)]` only |
 | `ui/mod.rs` | `draw`, the panel renderers and the block font |
-| `ui/overlay.rs` | The two popups: help, and one solve in full |
+| `ui/overlay.rs` | The three popups: help, the session list, and one solve in full |
 | `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
 | `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
 | `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |

@@ -141,7 +141,7 @@ spaces do not matter.
 | `/pyraminx` `/skewb` `/megaminx` `/sq1` `/clock` | the same, for the five non-cube events |
 | `/oh` | the same, for 3x3 one-handed |
 | `/new [name]` | start a new session for the current puzzle |
-| `/sessions` | list every session with its id, puzzle and solve count |
+| `/sessions` | open a popup listing every session with its id, puzzle and solve count |
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
 | `/delsession [id]` | delete a session and its solves, current one by default |
@@ -182,6 +182,11 @@ Their solves are yours to penalise and delete as usual, but the sessions
 themselves cannot be renamed, retyped or deleted, so `/4x4` always has somewhere
 to land. `/new` gives you as many sessions of your own as you want, with ids
 from 13 up, and without a name they are numbered for you.
+
+`/sessions` shows the lot in a popup, one row each, with the session you are in
+highlighted and the twelve `default` names dimmed so your own stand out. `Esc`
+closes it. On a terminal too short to hold every row, the ones that did not fit
+are counted on the last line.
 
 A save file written by an older Cubetimer is brought up to this layout when it
 is read, however far back it came from. The old `default` session keeps its

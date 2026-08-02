@@ -82,6 +82,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // One overlay at a time, and the detail popup is the one the user just asked for.
     if let Some(index) = app.solve_detail {
         overlay::draw_detail(frame, app, index, area);
+    } else if app.show_sessions {
+        overlay::draw_sessions(frame, app, area);
     } else if app.show_help {
         overlay::draw_help(frame, area);
     }

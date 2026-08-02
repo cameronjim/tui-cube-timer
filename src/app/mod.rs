@@ -58,6 +58,8 @@ pub struct App {
     pub scramble: String,
     pub status_msg: Option<String>,
     pub show_help: bool,
+    /// Open sessions overlay. Mutually exclusive with [`App::show_help`]; the solve detail wins over both.
+    pub show_sessions: bool,
     /// Times-list cursor, counted from the newest solve: 0 is the newest.
     pub times_selected: usize,
     /// Open solve-detail overlay, holding the same index-from-newest as [`App::times_selected`].
@@ -106,6 +108,7 @@ impl App {
             scramble: scramble::generate(puzzle),
             status_msg: None,
             show_help: false,
+            show_sessions: false,
             times_selected: 0,
             solve_detail: None,
             should_quit: false,
@@ -195,6 +198,14 @@ impl App {
 
     fn status<S: Into<String>>(&mut self, msg: S) {
         self.status_msg = Some(msg.into());
+    }
+
+    /// Toggle the help overlay. The two popups are alternatives, so opening one closes the other.
+    fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+        if self.show_help {
+            self.show_sessions = false;
+        }
     }
 
     fn start_inspection(&mut self) {
@@ -406,10 +417,11 @@ impl App {
                     self.new_scramble();
                     self.status_msg = None;
                 }
-                KeyCode::Char('h') | KeyCode::Char('?') => self.show_help = !self.show_help,
+                KeyCode::Char('h') | KeyCode::Char('?') => self.toggle_help(),
                 KeyCode::Esc => {
-                    if self.show_help {
+                    if self.show_help || self.show_sessions {
                         self.show_help = false;
+                        self.show_sessions = false;
                     } else {
                         self.status_msg = None;
                     }
@@ -1113,6 +1125,47 @@ mod tests {
 
         app.on_key(press(KeyCode::Esc));
         assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_sessions_overlay_and_help_replaces_it() {
+        let (mut app, _g) = test_app("key-sessions");
+        app.show_sessions = true;
+        app.status_msg = Some("something".to_string());
+
+        // The two popups are alternatives, so 'h' takes the screen from the listing.
+        app.on_key(press(KeyCode::Char('h')));
+        assert!(app.show_help, "'h' still opens the help");
+        assert!(!app.show_sessions, "and closes the sessions overlay");
+        app.on_key(press(KeyCode::Char('?')));
+        assert!(!app.show_help, "'?' still closes it");
+        assert!(!app.show_sessions);
+
+        app.show_sessions = true;
+        app.on_key(press(KeyCode::Esc));
+        assert!(!app.show_sessions, "Esc closes the sessions overlay");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("something"),
+            "and stops there, exactly as it does for the help"
+        );
+        app.on_key(press(KeyCode::Esc));
+        assert!(app.status_msg.is_none());
+    }
+
+    #[test]
+    fn the_sessions_overlay_is_not_modal() {
+        // It behaves like the help overlay, which the keys behind it ignore entirely.
+        let (mut app, _g) = test_app("key-sessions-nonmodal");
+        app.show_sessions = true;
+        let before = app.scramble.clone();
+
+        app.on_key(press(KeyCode::Char('n')));
+        assert_ne!(app.scramble, before, "'n' still re-scrambles");
+        assert!(app.show_sessions, "and the overlay stays open");
+
+        app.on_key(press(SPACE));
+        assert!(matches!(app.state, TimerState::Armed { .. }), "space still arms");
     }
 
     // ------------------------------------------------------- the times cursor

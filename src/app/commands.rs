@@ -76,9 +76,7 @@ impl App {
             "ok" => self.cmd_set_penalty(Penalty::None),
             "inspect" => self.cmd_toggle_inspection(),
             "hidetime" => self.cmd_toggle_hide_time(),
-            "help" => {
-                self.show_help = !self.show_help;
-            }
+            "help" => self.toggle_help(),
             "quit" | "q" => self.should_quit = true,
             _ => self.status(format!("unknown command: {}", cmd)),
         }
@@ -142,23 +140,11 @@ impl App {
         self.save_now();
     }
 
+    /// Open the sessions overlay. The listing outgrew the one-line status bar at twelve
+    /// permanent defaults, so it is a popup and `ui` does the formatting.
     fn cmd_list_sessions(&mut self) {
-        let list = self
-            .save
-            .sessions
-            .iter()
-            .map(|s| {
-                format!(
-                    "{}:{}({})[{}]",
-                    s.id,
-                    s.name,
-                    s.puzzle.name(),
-                    s.solves.len()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("  ");
-        self.status(list);
+        self.show_sessions = true;
+        self.show_help = false;
     }
 
     fn cmd_switch_session(&mut self, rest: &str) {
@@ -753,14 +739,43 @@ mod tests {
     }
 
     #[test]
-    fn sessions_lists_every_session() {
+    fn sessions_opens_the_overlay_instead_of_filling_the_status_line() {
         let (mut app, _g) = test_app("cmd-sessions");
         add_solve(&mut app, 1_234);
         run_command(&mut app, "new second");
+
         run_command(&mut app, "sessions");
-        let msg = app.status_msg.clone().expect("listing");
-        assert!(msg.contains("1:default(3x3)[1]"), "got {msg}");
-        assert!(msg.contains("second(3x3)[0]"), "got {msg}");
+        assert!(app.show_sessions, "the listing is a popup now");
+        assert!(
+            app.status_msg.is_none(),
+            "twelve defaults do not fit on one line, so nothing goes there: {:?}",
+            app.status_msg
+        );
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len() + 1,
+            "listing them creates or removes nothing"
+        );
+    }
+
+    #[test]
+    fn the_sessions_and_help_overlays_are_alternatives() {
+        let (mut app, _g) = test_app("cmd-sessions-help");
+        run_command(&mut app, "help");
+        assert!(app.show_help);
+
+        run_command(&mut app, "sessions");
+        assert!(app.show_sessions, "/sessions opens the listing");
+        assert!(!app.show_help, "and closes the help");
+
+        run_command(&mut app, "help");
+        assert!(app.show_help, "/help opens the help");
+        assert!(!app.show_sessions, "and closes the listing");
+
+        // Toggling the help back off leaves the listing closed rather than restoring it.
+        run_command(&mut app, "help");
+        assert!(!app.show_help);
+        assert!(!app.show_sessions);
     }
 
     #[test]

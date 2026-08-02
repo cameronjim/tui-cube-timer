@@ -44,10 +44,10 @@ notation in common:
 | `clock.rs` | Fifteen dial tokens around a `y2` |
 
 `src/ui/` splits the same way, along the line between drawing and arithmetic. `mod.rs`
-holds `draw`, the panel renderers and the block font; `overlay.rs` holds the two popups,
-the help reference and one solve in full, which are the only things drawn over the frame
-rather than into it; `layout.rs` holds the pure geometry, meaning panel heights, word
-wrapping, popup placement, the visible slice of the times list and `inner_of`.
+holds `draw`, the panel renderers and the block font; `overlay.rs` holds the three popups,
+the help reference, the session list and one solve in full, which are the only things drawn
+over the frame rather than into it; `layout.rs` holds the pure geometry, meaning panel
+heights, word wrapping, popup placement, the visible slice of the times list and `inner_of`.
 Nothing in `layout.rs` sees a `Frame` or an `App`, which is what makes the degradation
 rules testable as ordinary functions rather than by eye.
 
@@ -448,7 +448,7 @@ produces `unknown command: <verb>` in the status line.
 | --- | --- |
 | `/2x2` … `/7x7`, `/pyraminx`, `/skewb`, `/megaminx`, `/sq1`, `/clock`, `/oh` | Activate that puzzle's default session (see the navigation rule below) |
 | `/new [name]` | Create and activate a session for the current puzzle |
-| `/sessions` | List every session as `id:name(puzzle)[count]` |
+| `/sessions` | Open the sessions overlay |
 | `/session <id>` | Activate a session by id, adopting its puzzle |
 | `/rename <name>` | Rename the active session, refused on a default |
 | `/delsession [id]` | Delete a session and its solves, the active one by default |
@@ -766,13 +766,26 @@ panic and without a blank screen:
   silently clipping a line. Twelve puzzle names no longer fit on one row and the popup does
   not wrap, so `puzzle_help_rows` packs them into as many rows as the description column
   allows and the continuation rows are drawn under an empty key column.
+- **Sessions overlay** is `SESSIONS_W` (44) columns and one row per session, plus a last row
+  and the border. `sessions_popup` returns both the rect and how many sessions to draw,
+  because the renderer holds no scroll state: when the list is taller than the terminal the
+  last row goes to `+N more` instead of a session, and the `esc: close` hint it would
+  otherwise hold is the first thing dropped. Each row is `id name puzzle [count]` in fixed
+  columns, the name clipped to `SESSIONS_NAME_W` (18) with an ellipsis, the twelve `default`
+  names dimmed, and the active session's row reversed across the full popup width.
 - **Solve-detail overlay** is `DETAIL_W` (52) columns and grows with the scramble it has to
   show: `detail_popup` runs the scramble through the same `scramble_rows` the header uses,
   adds `DETAIL_FIXED_ROWS` of 6 for the time, the date, the hint and the blanks between
   them, adds the border and caps at `DETAIL_MAX_H` of 20. Megaminx lands at 15 rows and a
   one-line scramble at the floor. `centered()` clamps it like the help popup, and
-  `draw_detail` returns early below 4 by 4. When both overlays are somehow open, `draw`
-  picks the detail popup, because it is the one the user just asked for.
+  `draw_detail` returns early below 4 by 4.
+
+`draw` picks one popup and only one. The detail popup wins, because it is the one the user
+just asked for and it is the only modal of the three. Help and sessions cannot both be open
+in the first place: `App::toggle_help` clears `show_sessions` and `cmd_list_sessions` clears
+`show_help`, so the exclusion is enforced where the state changes rather than in the
+renderer. Both are non-modal, so the keys behind them keep working and `Esc` closes
+whichever is open before it moves on to clearing the status line.
 
 ### The adaptive header
 
