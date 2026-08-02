@@ -17,7 +17,12 @@ Build it once:
 cargo build --release
 ```
 
-Then run `target\release\cubetimer.exe`, or drop that file somewhere on your
+Then run:
+```
+target\release\cubetimer.exe
+```
+
+Or drop that file somewhere on your
 PATH and just type `cubetimer`. During development, `cargo run --release` does
 both steps at once.
 
