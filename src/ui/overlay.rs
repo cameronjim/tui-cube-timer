@@ -79,6 +79,8 @@ pub(super) fn draw_help(frame: &mut Frame, area: Rect) {
         help_row("/dnf  /+2  /ok", "set the last solve's penalty"),
         help_row("/inspect", "toggle 15s inspection (off by default)"),
         help_row("/hidetime", "toggle hiding the time while solving"),
+        help_row("/export [path]", "write your times as csTimer JSON"),
+        help_row("/import <path>", "bring csTimer sessions in as new sessions"),
         help_row("/help", "toggle this help"),
         help_row("/quit  /q", "quit"),
         Line::from(""),
@@ -320,12 +322,22 @@ mod tests {
             "in details: load its scramble / close",
             "delete solve n, newest by default",
             "toggle hiding the time while solving",
+            "write your times as csTimer JSON",
+            "bring csTimer sessions in as new sessions",
         ] {
             assert!(text.contains(row), "the help is missing {:?}", row);
         }
         assert!(
             text.contains("/hidetime") && text.contains("/del [n]"),
             "the help is missing a command name"
+        );
+        assert!(
+            text.contains("/export [path]") && text.contains("/import <path>"),
+            "the help is missing the csTimer commands"
+        );
+        assert!(
+            text.contains("press h, ? or esc to close"),
+            "the popup still fits its last row at forty rows"
         );
     }
 

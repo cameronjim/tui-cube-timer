@@ -1,4 +1,4 @@
-//! Test scaffolding shared by the four files of `app`.
+//! Test scaffolding shared by the five files of `app`.
 //!
 //! The helpers are short on purpose: they appear dozens of times per file.
 
@@ -130,7 +130,17 @@ pub(super) fn start_timing_now(app: &mut App) {
 
 /// Record a solve through the real path, then clear the guards a user clears by waiting.
 pub(super) fn perform_solve(app: &mut App) {
+    perform_solve_of(app, 0);
+}
+
+/// Record a solve of roughly `millis` by backdating the running timer before stopping it.
+///
+/// The recorded time is a hair over `millis`, never under, so assertions must allow for that.
+pub(super) fn perform_solve_of(app: &mut App, millis: u64) {
     start_timing_now(app);
+    app.state = TimerState::Timing {
+        started: ago(ms(millis)),
+    };
     app.on_key(press(KeyCode::Char('x')));
     app.on_key(release(KeyCode::Char('x')));
     app.stopped_at = None;

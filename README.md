@@ -151,6 +151,8 @@ spaces do not matter.
 | `/del [n]` | delete solve number `n`, or your newest solve if you leave `n` off |
 | `/inspect` | turn 15 second inspection on or off |
 | `/hidetime` | hide or show the running time while you solve |
+| `/export [path]` | write every session out as a csTimer file |
+| `/import <path>` | read a csTimer file in as new sessions |
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
@@ -243,6 +245,32 @@ somewhere else.
 If that file ever does turn up unreadable, Cubetimer refuses to start and tells
 you the path rather than starting fresh over the top of it.
 
+## Taking your times with you
+
+Cubetimer reads and writes csTimer's export format, so your history is not
+trapped in either program. `/export` writes every session, solves, scrambles,
+penalties and timestamps included, to `cubetimer-cstimer-export.json` in the
+directory you started Cubetimer from, and the status line tells you the full
+path it landed at. Give it an argument, as in `/export C:\backups\times.json`,
+and it writes there instead. Nothing about your save file changes, so exporting
+is also the quickest way to take a backup. What comes out is the shape csTimer's
+own importer reads, and reading it back into Cubetimer returns every solve as it
+was, give or take the fraction of a second in a timestamp that csTimer counts in
+whole seconds.
+
+`/import <path>` goes the other way and reads a file csTimer exported. Every
+session in it arrives as a **new** session of your own with the next free id,
+keeping the name csTimer had for it. An import never merges into a session that
+already exists, never touches a solve you already had, and never moves you out
+of the session you are in, so the worst an unwanted import can do is leave you
+some sessions to `/delsession`. The status line counts what came in.
+
+The twelve events line up in both directions, one-handed included. Events
+csTimer has and Cubetimer does not, blindfolded and fewest moves among them, are
+skipped rather than filed under the nearest match, because 3x3 blindfolded times
+in a 3x3 average would be nonsense. The status line says how many were passed
+over, as in `imported 4 sessions (2 skipped)`.
+
 ## How the stats work
 
 Your averages follow WCA rules. An ao5 or ao12 throws out the best and the worst
@@ -275,6 +303,22 @@ currently on, and the rolling windows behind them are searched within each
 session rather than across the seam between two of them. On a narrow terminal a
 row drops entries from the right rather than wrapping, so the numbers you look at
 most stay put.
+
+When the window is tall enough, a two row sparkline labelled `trend` appears
+under those three rows, plotting your last fifty solves with the newest at the
+right. The bars are times, so a dip is a fast solve and a rising staircase is a
+session going the wrong way. DNFs have no time to draw and are simply absent. It
+is the first thing the left column gives up: the moment the terminal is too short
+to hold both the bars and the big digits, the sparkline goes and the digits stay.
+On a panel too narrow for fifty bars the oldest solves are dropped rather than
+the newest.
+
+Beating a personal best says so. When a solve is faster than your best ever
+single, or its ao5 beats your best ever ao5, a green `new pb` line appears over
+the digits for five seconds and the result underneath turns green with it. Both
+at once are named on the same line. Only a record you actually beat counts:
+matching one exactly is not beating it, and the first single or ao5 you ever
+record had nothing to beat, so it passes quietly.
 
 ## Scrambles
 

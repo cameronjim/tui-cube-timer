@@ -10,7 +10,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::layout::inner_of;
-use super::{dim, panel, C_ARMED, C_IDLE, C_INSPECT, C_READY, C_STAGE1, C_STAGE2, C_TIMING};
+use super::{
+    dim, panel, C_ARMED, C_IDLE, C_INSPECT, C_PB, C_READY, C_STAGE1, C_STAGE2, C_TIMING,
+};
 use crate::app::{App, TimerState};
 use crate::types::format_millis;
 
@@ -25,12 +27,20 @@ type TimerView = (String, Color, Option<(String, Color)>, &'static str);
 
 fn timer_view(app: &App) -> TimerView {
     match app.state {
-        TimerState::Idle => (
-            format_millis(app.display_millis),
-            C_IDLE,
-            None,
-            "ready, hold space",
-        ),
+        TimerState::Idle => {
+            // A personal best recolours the result it was set on, until `app` drops the banner.
+            let color = if app.pb_banner.is_some() {
+                C_PB
+            } else {
+                C_IDLE
+            };
+            (
+                format_millis(app.display_millis),
+                color,
+                None,
+                "ready, hold space",
+            )
+        }
         TimerState::Inspecting { .. } => {
             let remaining = app.inspection_remaining.unwrap_or(15);
             // The stage is decided by `app`, so neither the warning colour nor the call it
@@ -113,6 +123,22 @@ pub(super) fn draw_timer(frame: &mut Frame, app: &App, area: Rect) {
         body.push(Line::styled(text, style));
     }
 
+    // The celebration sits directly over the digits, and is the first line the panel gives up.
+    if let Some(banner) = app.pb_banner.as_deref() {
+        if (inner.height as usize) > body.len() {
+            body.insert(
+                0,
+                Line::styled(
+                    banner.to_string(),
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(C_PB)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+        }
+    }
+
     if let Some((text, color)) = note {
         body.push(Line::from(""));
         body.push(Line::styled(
@@ -182,11 +208,28 @@ fn big_text(s: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::super::testkit::{
-        app_with, cells_colored, render, render_all, render_buffer, row_cells, row_with,
+        app_with, cells_colored, render, render_all, render_buffer, row_cells, row_with, rows_of,
     };
     use super::*;
     use crate::types::Puzzle;
     use std::time::Instant;
+
+    /// Block cells above the stats strip, which is the big timer and nothing else.
+    ///
+    /// The trend sparkline draws full blocks of its own, so a count over the whole frame would
+    /// stop being a count of the digits.
+    fn timer_blocks(app: &App, w: u16, h: u16) -> usize {
+        let buffer = render_buffer(app, w, h);
+        let rows = rows_of(&buffer);
+        let stats = rows
+            .iter()
+            .position(|row| row.contains(" stats "))
+            .unwrap_or(rows.len());
+        rows[..stats]
+            .iter()
+            .map(|row| row.matches('█').count())
+            .sum()
+    }
 
     #[test]
     fn hiding_the_time_masks_the_running_solve_but_not_the_result() {
@@ -196,17 +239,17 @@ mod tests {
         };
         app.display_millis = 12_340;
 
-        let visible = render(&app, 80, 30).matches('█').count();
+        let visible = timer_blocks(&app, 80, 30);
         app.save.settings.hide_time = true;
-        let hidden = render(&app, 80, 30).matches('█').count();
-        // Three dots are one glyph row of two cells each, and nothing else in the frame is a block.
+        let hidden = timer_blocks(&app, 80, 30);
+        // Three dots are one glyph row of two cells each, and nothing else up there is a block.
         assert_eq!(hidden, 6, "only the three dots survive, got {} blocks", hidden);
         assert!(visible > hidden, "the digits were drawn before, got {}", visible);
         render_all(&app);
 
         // Back in Idle the finished time is on screen as usual.
         app.state = TimerState::Idle;
-        assert!(render(&app, 80, 30).matches('█').count() > 6);
+        assert!(timer_blocks(&app, 80, 30) > 6);
     }
 
     #[test]
@@ -261,6 +304,90 @@ mod tests {
                 "the penalty red must win over the stage colour"
             );
         }
+    }
+
+    #[test]
+    fn a_personal_best_banner_takes_the_row_over_the_digits_and_turns_them_green() {
+        let mut app = app_with(Puzzle::Cube3, 5);
+        app.display_millis = 12_340;
+        app.pb_banner = Some("new pb single: 12.34".to_string());
+        let buffer = render_buffer(&app, 80, 30);
+
+        let banner = row_with(&buffer, "new pb single: 12.34");
+        assert!(
+            row_cells(&buffer, banner).iter().any(|c| c.bg == C_PB
+                && c.fg == Color::Black
+                && c.modifier.contains(Modifier::BOLD)),
+            "the banner is bold black on light green"
+        );
+
+        let digits = row_with(&buffer, "█");
+        assert!(digits > banner, "and it sits directly over the digits");
+        assert!(
+            row_cells(&buffer, digits)
+                .iter()
+                .filter(|c| c.symbol() == "█")
+                .all(|c| c.fg == C_PB),
+            "the result celebrates in the same green as the banner"
+        );
+        render_all(&app);
+    }
+
+    #[test]
+    fn without_a_banner_the_idle_digits_are_the_white_they_always_were() {
+        let mut app = app_with(Puzzle::Cube3, 5);
+        app.display_millis = 12_340;
+        let buffer = render_buffer(&app, 80, 30);
+
+        assert_eq!(
+            cells_colored(&buffer, C_PB),
+            0,
+            "an ordinary solve celebrates nothing"
+        );
+        let digits = row_with(&buffer, "█");
+        assert!(
+            row_cells(&buffer, digits)
+                .iter()
+                .filter(|c| c.symbol() == "█")
+                .all(|c| c.fg == C_IDLE)
+        );
+    }
+
+    #[test]
+    fn the_banner_is_the_first_line_a_short_panel_drops() {
+        let mut app = app_with(Puzzle::Cube3, 3);
+        app.pb_banner = Some("new pb ao5: 13.07".to_string());
+        render_all(&app);
+
+        // Fifteen rows leave the timer six inside its border: the five glyph rows and the banner.
+        assert!(render(&app, 80, 15).contains("new pb ao5"));
+
+        // Fourteen leave it exactly the glyph rows, and the digits outrank the celebration.
+        let text = render(&app, 80, 14);
+        assert!(text.contains('█'), "the block font keeps its rows");
+        assert!(!text.contains("new pb ao5"), "the banner is what goes");
+    }
+
+    #[test]
+    fn a_banner_never_takes_the_colour_of_a_running_inspection() {
+        let mut app = app_with(Puzzle::Cube3, 5);
+        app.pb_banner = Some("new pb single: 9.87".to_string());
+        app.state = TimerState::Inspecting {
+            started: Instant::now(),
+        };
+        app.inspection_stage = 2;
+        app.inspection_remaining = Some(2);
+
+        let buffer = render_buffer(&app, 80, 30);
+        assert!(
+            cells_colored(&buffer, C_STAGE2) > 0,
+            "the countdown keeps the stage it is in"
+        );
+        assert_eq!(
+            cells_colored(&buffer, C_PB),
+            0,
+            "the celebration recolours an idle result and nothing else"
+        );
     }
 
     #[test]

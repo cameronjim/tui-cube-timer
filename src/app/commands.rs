@@ -4,12 +4,19 @@
 //! Every handler here mutates [`App`] exactly as the key handlers do, and funnels its writes
 //! through `save_now`. The timer state machine stays in [`super`].
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::repair;
 use super::{App, InputMode};
+use crate::cstimer;
 use crate::storage;
 use crate::types::{Penalty, Puzzle, Session};
+
+/// Where `/export` writes when it is given no path.
+const EXPORT_FILE: &str = "cubetimer-cstimer-export.json";
 
 impl App {
     /// The one entry point the state machine calls; everything below it stays in this file.
@@ -74,6 +81,8 @@ impl App {
             "dnf" => self.cmd_set_penalty(Penalty::Dnf),
             "+2" => self.cmd_set_penalty(Penalty::Plus2),
             "ok" => self.cmd_set_penalty(Penalty::None),
+            "export" => self.cmd_export(rest),
+            "import" => self.cmd_import(rest),
             "inspect" => self.cmd_toggle_inspection(),
             "hidetime" => self.cmd_toggle_hide_time(),
             "help" => self.toggle_help(),
@@ -258,6 +267,64 @@ impl App {
         self.save_now();
     }
 
+    /// Write every session out as a csTimer export. Nothing about the save file changes.
+    fn cmd_export(&mut self, rest: &str) {
+        let path = PathBuf::from(if rest.is_empty() { EXPORT_FILE } else { rest });
+        let text = cstimer::export(&self.save);
+        match fs::write(&path, text) {
+            Ok(()) => {
+                let shown = shown_path(&path);
+                self.status(format!("exported to {}", shown.display()));
+            }
+            Err(e) => self.status(format!("export failed: {}", e)),
+        }
+    }
+
+    /// Adopt a csTimer export. Every session in it arrives as a new one: an import never
+    /// merges into a session that already exists, and it never moves you out of the one you
+    /// are in.
+    fn cmd_import(&mut self, rest: &str) {
+        if rest.is_empty() {
+            self.status("usage: /import <path>");
+            return;
+        }
+        let text = match fs::read_to_string(rest) {
+            Ok(text) => text,
+            Err(e) => {
+                self.status(format!("import failed: {}", e));
+                return;
+            }
+        };
+        let imported = match cstimer::import(&text) {
+            Ok(imported) => imported,
+            Err(e) => {
+                self.status(format!("import failed: {}", e));
+                return;
+            }
+        };
+
+        let count = imported.sessions.len();
+        for session in imported.sessions {
+            let id = self.push_session(session.name, session.puzzle);
+            if let Some(target) = self.save.sessions.iter_mut().find(|s| s.id == id) {
+                target.solves = session.solves;
+            }
+        }
+
+        self.refresh_derived();
+        let plural = if count == 1 { "" } else { "s" };
+        let msg = if imported.skipped == 0 {
+            format!("imported {} session{}", count, plural)
+        } else {
+            format!(
+                "imported {} session{} ({} skipped)",
+                count, plural, imported.skipped
+            )
+        };
+        self.status(msg);
+        self.save_now();
+    }
+
     fn cmd_toggle_inspection(&mut self) {
         self.save.settings.inspection = !self.save.settings.inspection;
         let s = if self.save.settings.inspection {
@@ -296,6 +363,17 @@ impl App {
             }
             None => self.status("no solves yet"),
         }
+    }
+}
+
+/// The path to name on the status line: a relative one is where the app was started from.
+fn shown_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -1041,5 +1119,233 @@ mod tests {
         assert!(app.save.settings.inspection);
         run_command(&mut app, "2X2");
         assert_eq!(app.current_session().puzzle, Puzzle::Cube2);
+    }
+
+    // ---- csTimer interchange
+
+    /// A csTimer file written by hand rather than by our own exporter: two sessions, one of
+    /// them an event Cubetimer does not have.
+    fn sample_export() -> String {
+        let session_data = serde_json::json!({
+            "1": { "name": "weekend", "opt": { "scrType": "222so" }, "rank": 1 },
+            "2": { "name": "blind", "opt": { "scrType": "333ni" }, "rank": 2 }
+        })
+        .to_string();
+        serde_json::json!({
+            "session1": [
+                [[0, 3_000], "R U", "", 1_700_000_000],
+                [[2000, 4_000], "F R", "", 1_700_000_060]
+            ],
+            "session2": [[[0, 60_000], "R U", "", 1_700_000_120]],
+            "properties": { "sessionN": 2, "sessionData": session_data }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn export_writes_a_file_import_can_read_and_touches_nothing() {
+        let (mut app, _g) = test_app("cmd-export");
+        add_solve(&mut app, 12_340);
+        let out = TempPath::new("cmd-export-out");
+        let before = app.save.sessions.len();
+
+        run_command(&mut app, &format!("export {}", out.path.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("exported to "), "{status}");
+        assert!(
+            status.contains(&out.path.display().to_string()),
+            "the status names the file: {status}"
+        );
+        assert_eq!(app.save.sessions.len(), before, "export creates no session");
+        assert_eq!(app.current_session().solves.len(), 1, "and deletes nothing");
+
+        let text = fs::read_to_string(&out.path).expect("the file is there");
+        let back = cstimer::import(&text).expect("our own export parses");
+        assert_eq!(back.skipped, 0);
+        assert_eq!(back.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+        assert_eq!(back.sessions[0].solves.len(), 1);
+        assert_eq!(back.sessions[0].solves[0].millis, 12_340);
+    }
+
+    #[test]
+    fn export_with_no_path_writes_the_default_name_and_reports_it_in_full() {
+        let (mut app, _g) = test_app("cmd-export-default");
+        add_solve(&mut app, 9_000);
+
+        run_command(&mut app, "export");
+
+        // Read and remove before asserting, so a failure cannot leave the file behind.
+        let expected = shown_path(Path::new(EXPORT_FILE));
+        let written = fs::read_to_string(&expected);
+        let _ = fs::remove_file(&expected);
+
+        let text = written.expect("the default path is in the working directory");
+        assert!(cstimer::import(&text).is_ok(), "and holds an export");
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some(format!("exported to {}", expected.display()).as_str()),
+            "a relative path is reported in full"
+        );
+        assert!(expected.is_absolute());
+    }
+
+    #[test]
+    fn export_reports_an_io_error_rather_than_failing() {
+        let (mut app, _g) = test_app("cmd-export-bad");
+        // A directory that does not exist: `fs::write` does not create parents.
+        let missing = std::env::temp_dir()
+            .join("cubetimer-no-such-dir")
+            .join("out.json");
+
+        run_command(&mut app, &format!("export {}", missing.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("export failed: "), "{status}");
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn import_adopts_every_session_it_understands_as_a_new_one() {
+        let (mut app, _g) = test_app("cmd-import");
+        add_solve(&mut app, 11_000);
+        let active = app.save.active_session_id;
+        let scramble = app.scramble.clone();
+        let file = TempPath::new("cmd-import-src");
+        fs::write(&file.path, sample_export()).expect("fixture written");
+
+        run_command(&mut app, &format!("import {}", file.path.display()));
+
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("imported 1 session (1 skipped)"),
+            "3x3 bld is not one of our events"
+        );
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+
+        let adopted = app.save.sessions.last().expect("the imported session");
+        assert!(
+            adopted.id >= FIRST_USER_ID,
+            "an import lands in the user id space, got {}",
+            adopted.id
+        );
+        assert_eq!(adopted.name, "weekend");
+        assert_eq!(adopted.puzzle, Puzzle::Cube2);
+        assert_eq!(adopted.solves.len(), 2);
+        assert_eq!(adopted.solves[0].millis, 3_000);
+        assert_eq!(adopted.solves[1].penalty, Penalty::Plus2);
+        assert_eq!(adopted.solves[1].millis, 4_000, "the +2 is not folded in");
+        assert_eq!(adopted.solves[1].timestamp, 1_700_000_060_000);
+
+        assert_eq!(app.save.active_session_id, active, "you stay where you were");
+        assert_eq!(app.scramble, scramble, "and keep the scramble on screen");
+        assert_eq!(app.current_session().solves.len(), 1);
+
+        let loaded = storage::load(&app.data_path).expect("the import persists");
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+        assert_eq!(loaded.active_session_id, active);
+        let id = adopted.id;
+        assert!(loaded.sessions.iter().any(|s| s.id == id));
+        assert!(
+            loaded.next_session_id > id,
+            "the id counter moved past the adopted session"
+        );
+    }
+
+    #[test]
+    fn an_import_never_merges_into_a_session_that_already_exists() {
+        let (mut app, _g) = test_app("cmd-import-twice");
+        let file = TempPath::new("cmd-import-twice-src");
+        fs::write(&file.path, sample_export()).expect("fixture written");
+        let line = format!("import {}", file.path.display());
+
+        run_command(&mut app, &line);
+        run_command(&mut app, &line);
+
+        let weekends: Vec<&Session> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.name == "weekend")
+            .collect();
+        assert_eq!(weekends.len(), 2, "the same file twice is two sessions");
+        assert_ne!(weekends[0].id, weekends[1].id);
+        for session in weekends {
+            assert_eq!(session.solves.len(), 2, "neither one gained the other's solves");
+        }
+    }
+
+    #[test]
+    fn an_export_of_our_own_imports_back_with_every_session() {
+        let (mut app, _g) = test_app("cmd-roundtrip");
+        add_solve(&mut app, 12_340);
+        run_command(&mut app, "new evening");
+        add_solve(&mut app, 9_870);
+        let out = TempPath::new("cmd-roundtrip-out");
+
+        run_command(&mut app, &format!("export {}", out.path.display()));
+        run_command(&mut app, &format!("import {}", out.path.display()));
+
+        assert_eq!(
+            app.status_msg.as_deref(),
+            Some("imported 13 sessions"),
+            "twelve defaults and the one user session, none skipped"
+        );
+        assert_eq!(
+            app.save.sessions.len(),
+            (Puzzle::DEFAULT_ORDER.len() + 1) * 2
+        );
+        let copies: Vec<&Session> = app
+            .save
+            .sessions
+            .iter()
+            .filter(|s| s.name == "default 3x3")
+            .collect();
+        assert_eq!(copies.len(), 1, "a default comes back named after its event");
+        assert_eq!(copies[0].puzzle, Puzzle::Cube3);
+        assert_eq!(copies[0].solves.len(), 1);
+        assert_eq!(copies[0].solves[0].millis, 12_340);
+        assert_eq!(copies[0].solves[0].scramble, "R U R' U'");
+    }
+
+    #[test]
+    fn import_of_a_file_that_is_not_an_export_is_harmless() {
+        let (mut app, _g) = test_app("cmd-import-garbage");
+        let file = TempPath::new("cmd-import-garbage-src");
+        fs::write(&file.path, "this is not JSON at all").expect("fixture written");
+
+        run_command(&mut app, &format!("import {}", file.path.display()));
+
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(
+            status.starts_with("import failed: not a csTimer export"),
+            "{status}"
+        );
+        assert_eq!(
+            app.save.sessions.len(),
+            Puzzle::DEFAULT_ORDER.len(),
+            "a refused import creates nothing"
+        );
+    }
+
+    #[test]
+    fn import_reports_a_missing_file_and_needs_a_path() {
+        let (mut app, _g) = test_app("cmd-import-missing");
+        run_command(&mut app, "import");
+        assert_eq!(app.status_msg.as_deref(), Some("usage: /import <path>"));
+
+        let missing = std::env::temp_dir().join("cubetimer-no-such-file.json");
+        run_command(&mut app, &format!("import {}", missing.display()));
+        let status = app.status_msg.clone().expect("a status line");
+        assert!(status.starts_with("import failed: "), "{status}");
+        assert_eq!(app.save.sessions.len(), Puzzle::DEFAULT_ORDER.len());
+    }
+
+    #[test]
+    fn shown_path_answers_with_something_the_user_can_find() {
+        let cwd = std::env::current_dir().expect("a working directory");
+        assert_eq!(shown_path(Path::new("out.json")), cwd.join("out.json"));
+        let absolute = std::env::temp_dir().join("out.json");
+        assert_eq!(shown_path(&absolute), absolute, "an absolute path is kept");
     }
 }

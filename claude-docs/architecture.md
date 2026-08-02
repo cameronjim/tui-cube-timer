@@ -14,20 +14,27 @@ conventions live in [../CLAUDE.md](../CLAUDE.md); code style rules are in
 
 ## Crate layout
 
-Seven modules, each with one job. Three of them are directories, because their single
+Eight modules, each with one job. Three of them are directories, because their single
 responsibility grew large enough to need internal structure. The boundaries are
-deliberate: `stats` and `scramble` are pure and know nothing about terminals, `ui` is
-read-only with respect to state, and only `storage` touches the filesystem.
+deliberate: `stats`, `scramble` and `cstimer` are pure and know nothing about terminals,
+`ui` is read-only with respect to state, and only `storage` touches the filesystem.
 
 | Module | Owns | Depends on |
 | --- | --- | --- |
 | `src/main.rs` | Terminal setup and teardown, startup load, the event loop | `app`, `storage`, `ui` |
-| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `scramble`, `stats`, `storage`, `types` |
+| `src/app/` | `App` state, the timer state machine, key handling, `/commands`, save-file repair, the derived fields the UI reads | `cstimer`, `scramble`, `stats`, `storage`, `types` |
 | `src/ui/` | Every widget drawn, the block font, layout degradation | `app`, `types` |
 | `src/scramble/` | Scramble generation per puzzle | `types`, `rand` |
 | `src/stats.rs` | Averages, session summaries, personal bests | `types` |
+| `src/cstimer.rs` | Conversion between `SaveFile` and csTimer's export format, both directions | `types`, `serde_json` |
 | `src/storage.rs` | Data file location, JSON load and atomic save, format migration, wall clock | `types` |
 | `src/types.rs` | `Puzzle`, `Penalty`, `Solve`, `Session`, `Settings`, `SaveFile`, the default-session ids, time and date formatting | serde only |
+
+`cstimer.rs` is a pair of pure functions, `export(&SaveFile) -> String` and
+`import(&str) -> Result<Import, String>`, and it opens nothing. `/export` and `/import` in
+`app/commands.rs` own the file handling and the id bookkeeping on the way in, which keeps
+the format knowledge in one file and the IO where every other write already is. The format
+itself is described in [algorithms.md](algorithms.md).
 
 `src/scramble/` is one file per puzzle family behind a dispatching `mod.rs`. The
 generators share nothing but the `Rng` they are handed, because the puzzles have no
@@ -54,28 +61,31 @@ is what makes the degradation rules testable as ordinary functions rather than b
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, stats, times list and status line | 367 |
-| `timer.rs` | `timer_view`, `draw_timer`, `GLYPH_H` and the 5-row block font | 181 |
-| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 238 |
-| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, popup placement | 239 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 430 |
+| `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
+| `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 240 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 268 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
 the single `pub(super) fn on_command_key` and never touched from outside `app`.
 `selection.rs` is the state that says which solve or session you are pointing at, which the
 timer never reads: the times cursor, the solve-detail overlay and the sessions picker.
-`repair.rs` answers "is this save file internally consistent", which nothing in the timer
-flow ever asks, and is a handful of free functions over `&mut SaveFile` rather than `App`
-methods. The split is invisible from outside: `crate::app::App` and its public fields and
-methods keep the paths they had when `app` was one file.
+`progress.rs` answers "how is this session going", which is the trend window and the
+personal-best celebration, neither of which is timer state. `repair.rs` answers "is this
+save file internally consistent", which nothing in the timer flow ever asks, and is a
+handful of free functions over `&mut SaveFile` rather than `App` methods. The split is
+invisible from outside: `crate::app::App` and its public fields and methods keep the paths
+they had when `app` was one file.
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 475 |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 303 |
+| `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 497 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 381 |
 | `selection.rs` | `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 116 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
-| `testkit.rs` | `#[cfg(test)]` scaffolding the other four share: `TempPath`, `test_app`, `press`, `run_command` | 137 |
+| `progress.rs` | `trend_of`, `pb_banner_text`, `note_pb`, `clear_pb_banner`, `expire_pb_banner` | 76 |
+| `testkit.rs` | `#[cfg(test)]` scaffolding the other five share: `TempPath`, `test_app`, `press`, `run_command` | 147 |
 
 `types.rs` is the shared vocabulary and is kept dependency-light on purpose, so a change
 to persistence or rendering never ripples into it. The dependency graph is acyclic and
@@ -86,8 +96,8 @@ Three rules keep the seams clean:
 
 1. **`ui` never does `Instant` math.** Anything time-derived that the renderer needs
    is precomputed into plain fields on `App` (`display_millis`, `inspection_remaining`,
-   `pending_inspection_penalty`, `inspection_stage`) by `App::on_tick` or by a state
-   transition. The renderer reads numbers, not clocks.
+   `pending_inspection_penalty`, `inspection_stage`, `pb_banner`) by `App::on_tick` or by a
+   state transition. The renderer reads numbers, not clocks.
 2. **`ui` never computes statistics either.** `App::stats` and `App::pbs` are cached and
    the renderer reads them. See below for why this is a rule and not a preference.
 3. **`app` never draws and `ui` never mutates.** `draw(frame: &mut Frame, app: &App)`
@@ -121,6 +131,51 @@ numbers actually change, which is at most once per solve.
 
 The 64 MB read limit in `storage::load`, described under Persistence, is the other half
 of the same fix: it bounds how large the input can be before any of this runs.
+
+### The trend window and the personal-best banner
+
+Two more read-only fields exist for the same reason, and both live behind
+`app/progress.rs`:
+
+```rust
+/// Effective times of the last `TREND_LEN` solves of the active session, oldest first.
+pub trend: Vec<u64>,
+/// The personal-best celebration currently on screen, cleared after `PB_BANNER`.
+pub pb_banner: Option<String>,
+```
+
+`trend` is what `ui::draw_trend` hands to ratatui's `Sparkline`. `progress::trend_of` takes
+the last `TREND_LEN` of 50 solves of the active session and keeps their
+`effective_millis()`, so a `+2` plots as the time it cost and a DNF, having no time, is
+absent rather than zero. It is refreshed by `refresh_derived` alongside the statistics, on
+exactly the same set of mutations, which is why a penalty change or a session switch moves
+the bars immediately.
+
+`pb_banner` is the celebration line, and `banner_since` beside it is the private `Instant`
+that retires it. `finish_solve` reads `pbs.single` and `pbs.ao5` *before* the new solve
+joins them, calls `refresh_derived`, and then calls `note_pb` with the two old values;
+`pb_banner_text` compares old against new and names each one the solve strictly beat:
+
+```rust
+fn improved(prev: Option<u64>, now: Option<u64>) -> Option<u64> {
+    match (prev, now) {
+        (Some(p), Some(n)) if n < p => Some(n),
+        _ => None,
+    }
+}
+```
+
+The `Some(p)` is the rule that keeps a first-ever record quiet: there was nothing to beat,
+so nothing is celebrated. The strict `<` is the rule that keeps an equalled record quiet
+too. Because the comparison runs against `App::pbs`, which `refresh_derived` builds from
+the sessions of the active puzzle only, a 2x2 record can never raise the banner on 3x3.
+
+The banner comes down two ways: `expire_pb_banner`, called first thing in `on_tick`, drops
+it once `PB_BANNER` of five seconds has passed, and `start_timing` drops it because the
+next solve has begun. Arming does not, so glancing at the banner and reaching for the space
+bar does not cost you the rest of the five seconds. `ui::timer` reads the field twice, once
+for the bold black-on-light-green line it inserts above the digits and once to colour the
+idle digits underneath in the same light green.
 
 ### Selection state and the judge-call stage
 
@@ -364,7 +419,10 @@ if let TimerState::Timing { started } = self.state {
 pending inspection penalty, the scramble that was on screen and a wall-clock timestamp
 from `storage::now_millis()`, pushes it onto the active session, clears the pending
 penalty, sets `display_millis` to the final time so the frozen result stays on screen,
-stamps `stopped_at`, generates a fresh scramble and writes the save file.
+stamps `stopped_at`, generates a fresh scramble, refreshes the derived fields, raises the
+personal-best banner if the solve earned one, and writes the save file. The order of the
+last three matters: the banner is decided by comparing the records read before the push
+against the ones `refresh_derived` has just recomputed.
 
 ### Two guards after a stop
 
@@ -502,6 +560,8 @@ produces `unknown command: <verb>` in the status line.
 | `/dnf`, `/+2`, `/ok` | Set the most recent solve's penalty |
 | `/inspect` | Toggle 15-second inspection, persisted |
 | `/hidetime` | Toggle masking the running time, persisted |
+| `/export [path]` | Write every session out as a csTimer export, `cubetimer-cstimer-export.json` by default |
+| `/import <path>` | Adopt a csTimer export, every session in it as a new one |
 | `/help` | Toggle the help overlay |
 | `/quit`, `/q` | Quit |
 
@@ -515,6 +575,20 @@ at a solve that has moved.
 `/inspect` and `/hidetime` are the only commands whose effect outlives the run. Both flip a
 field of `SaveFile::settings` and save, which is all persistence takes: `Settings` is part
 of the serialised file, so the next `storage::load` hands the preference straight back.
+
+`/export` and `/import` are the two commands that touch a file other than the save file,
+and they are the only callers of `cstimer`. `cmd_export` serialises `self.save` and writes
+the result with `fs::write`, defaulting to `EXPORT_FILE`, `cubetimer-cstimer-export.json`,
+in the working directory; `shown_path` resolves a relative path against the current
+directory so the status line names somewhere the user can actually go and look. It changes
+no session, no solve and no setting, and it does not call `save_now`, so an export is safe
+at any moment. `cmd_import` reads
+the file, hands the text to `cstimer::import`, and adopts each session it gets back through
+the same `push_session` that `/new` uses, so every arrival takes the next free id from
+`repair::take_id`. **An import never merges.** It writes into no session that already
+exists, leaves `active_session_id` alone, and reports `imported <n> sessions` with
+`(<n> skipped)` appended when the file held session kinds Cubetimer has no event for. Both
+commands report an IO or parse failure on the status line and change nothing.
 
 Every mutating command calls `save_now()`. Failures never propagate: `save_now` catches
 the `io::Error` and puts `save failed: <error>` in `status_msg`, so a read-only disk
@@ -744,6 +818,17 @@ Saves happen on **every solve** and on every mutating command, not on a timer an
 at exit. A crash or a closed terminal costs nothing. `main.rs` does one final save after
 restoring the terminal, and reports a failure on stderr where it is visible.
 
+### The csTimer file is not the save file
+
+`/export` and `/import` read and write a second, unrelated JSON shape, and none of this
+section applies to it. It is never loaded at startup, it carries no `version` field of
+Cubetimer's, and `cstimer::import` returns sessions with id 0 for the caller to number
+rather than anything that could be dropped into a `SaveFile` as it stands. Keeping the two
+apart is deliberate: the save format is a compatibility contract with files already on
+users' disks, while the csTimer format is a contract with another program and moves when
+that program moves. A change to one is never a reason to touch the other, and only
+`storage.rs` decides where Cubetimer's own data lives.
+
 ---
 
 ## How `ui` degrades
@@ -791,8 +876,16 @@ panic and without a blank screen:
   0 and it is not drawn at all.
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
-- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0. Its
-  three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
+- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 7
+  rows once it has at least 14, the extra 2 being the trend sparkline. `stats_height` is
+  the whole of that decision and `trend_rows` is the conditional half of it: the strip
+  appears at `STATS_H` (5) once `STATS_H + TIMER_MIN_H` fits, and the sparkline adds
+  `TREND_H` (2) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
+  are written against `TIMER_MIN_H`, so the bars can never be the reason the block font is
+  lost, and every terminal too short for them renders exactly what it did before the trend
+  existed. An empty trend claims no rows at all.
+
+  The three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
   the width of `current`, the longest of the three prefixes) plus a space: `current` over
   `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
   `best single, worst single, mean, solves`, then `best` over the same five windows again,
@@ -812,14 +905,25 @@ panic and without a blank screen:
   wide, every row is down to the one entry `fit_count` will never drop, and
   `best single 9.87` is wide enough that the paragraph clips it, which is the intended
   degradation: a clipped number still says more than a blank row.
+
+  `draw_trend` takes the rows below and spends the same `STAT_PREFIX_W` plus a space on a
+  dim `trend` label, so the bars begin in the column the three rows put their values in.
+  What it plots is `App::trend`, tail-sliced to the width it was given, because a panel too
+  narrow for fifty bars should drop the oldest solves rather than the ones just done. The
+  bars are times, so a dip is a fast solve. A panel with no room for anything past the
+  label draws neither.
 - **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
   coloured line, so the time is always legible even in a two-row body.
+- **Personal-best banner**, the line `draw_timer` inserts above the digits while
+  `App::pb_banner` is `Some`, is added only when the panel has a row left after the digits
+  themselves, so it is the first thing the timer panel gives up and the time is never
+  pushed off the screen by its own celebration.
 - **State caption**, the dim line under the digits that names what the timer is doing
   (`inspecting`, `keep holding…`, `release to start` and so on), is only appended when at
   least two spare rows remain after the digits.
-- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 28
+- **Help overlay** is `HELP_W` (62) columns wide and as tall as its content, currently 30
   text rows inside its border, placed by `centered()`, which clamps both to the available
   area. It is skipped entirely below 4 by 4. The height follows the content rather than
   being a constant because the content grows: `draw_help` builds the puzzle row from

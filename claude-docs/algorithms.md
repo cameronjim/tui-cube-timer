@@ -2,9 +2,10 @@
 
 This document covers the maths Cubetimer implements: WCA trimmed averages, untrimmed means,
 rolling bests and personal bests (`src/stats.rs`), scramble generation (`src/scramble/`),
-and the inspection penalty thresholds and judge calls (`src/app/mod.rs`). Every claim here
-describes the code as it stands, including the places where Cubetimer approximates the
-official rules rather than matching them.
+the inspection penalty thresholds and judge calls (`src/app/mod.rs`), and the csTimer
+interchange format (`src/cstimer.rs`). Every claim here describes the code as it stands,
+including the places where Cubetimer approximates the official rules rather than matching
+them.
 
 For how these pieces fit into the program, see [architecture.md](architecture.md).
 Project-level guidance is in [../CLAUDE.md](../CLAUDE.md); code style rules are in
@@ -265,6 +266,16 @@ matching the active session's puzzle, which is what makes the cached PBs event-s
 Combined with the puzzle-retype rule in [architecture.md](architecture.md), which prevents
 a session that already has solves from changing puzzle, this guarantees no personal best
 ever mixes events.
+
+### What the trend plots
+
+`app::progress::trend_of` is the one derived series that is not a statistic. It takes the
+last 50 solves of the active session and keeps their `effective_millis()`, so what the
+sparkline draws is the time each solve actually cost: a `+2` plots two seconds higher than
+the stopwatch said, and a DNF, having no effective time, is not plotted at all. Nothing is
+substituted for it, so the bars are shorter than the window whenever a DNF is in range and
+a run of them simply leaves fewer bars. The series is oldest first and unsmoothed, and the
+bar height is a time rather than a score, which makes a dip a fast solve.
 
 ---
 
@@ -730,6 +741,94 @@ The penalty display still wins over the stage. Once `inspection_remaining` reach
 below, `timer_view` paints the countdown plain red and puts `+2` or `DNF` in the caption
 slot instead of the call, so an earned penalty is never mistaken for a warning that has cost
 nothing yet.
+
+---
+
+## The csTimer interchange format
+
+`src/cstimer.rs` converts between `SaveFile` and the JSON csTimer exports, in both
+directions and with no file handling of its own. The shape below was read off csTimer's
+source rather than guessed from a sample, because the two places it is counter-intuitive,
+the penalty encoding and the string-inside-string nesting, are exactly the places a guess
+would be wrong.
+
+The top level is an object holding one `session<n>` key per session, numbered from 1, beside
+a `properties` object:
+
+```json
+{
+  "session1": [ [[0, 12340], "R U R' U'", "", 1700000000] ],
+  "properties": {
+    "sessionN": 1,
+    "session": 1,
+    "sessionData": "{\"1\":{\"name\":\"main\",\"opt\":{\"scrType\":\"333\"},\"rank\":1}}"
+  }
+}
+```
+
+**One solve is a four-element tuple**, `[[penalty, millis], scramble, comment, timestamp]`:
+
+| Slot | Holds |
+| --- | --- |
+| `penalty` | 0 clean, 2000 for a `+2`, -1 for a DNF |
+| `millis` | The **raw** time, with no penalty folded into it |
+| `scramble` | The scramble string, or an empty one |
+| `comment` | A per-solve note csTimer supports and Cubetimer does not; exported empty, ignored on import |
+| `timestamp` | Unix time in **seconds**, not milliseconds |
+
+The penalty column is the subtlety. The 2000 of a `+2` is a marker rather than an addend:
+csTimer stores the raw time beside it and adds the two seconds when it displays the result,
+which is exactly what `Solve::effective_millis` does, so `export_solve` writes `solve.millis`
+untouched and `import_solve` reads it back untouched. Folding the 2000 in would double it on
+the next read. A DNF keeps the time it would have been under a `-1`, so nothing is lost by
+marking a solve DNF in one program and clearing it in the other.
+
+Two smaller rules follow from the format being another program's: any positive penalty is
+legal in csTimer, so an unfamiliar one is added into the time on import and the total still
+reads correctly, and a time written as a float, which converters that build these files
+from text exports produce, is rounded rather than refused. Timestamps are divided by 1000
+on the way out and multiplied by 1000 on the way in, so a round trip is exact to the
+second and loses only the milliseconds beneath it.
+
+**`sessionData` is a JSON-encoded string, not an object.** It maps each session index to
+its `name`, its `rank` and its `opt.scrType`, and `properties` itself is sometimes stored
+the same way. Both are decoded through one `as_object` helper that accepts either form, as
+are the `session<n>` solve lists, so files written by older csTimer versions and by
+third-party converters all parse. `scr` is accepted as a fallback for `opt.scrType`,
+which is where the scramble type sat before csTimer moved it.
+
+`scrType` is the event, and the mapping is asymmetric on purpose. Export writes the one WCA
+type per event; import accepts that type and the whole-puzzle variants beside it, so a
+session someone kept on a non-WCA scrambler still lands on the right event:
+
+| Event | Exported as | Also imported from |
+| --- | --- | --- |
+| 3x3 | `333` | `333o`, `333noob` |
+| 3x3 one-handed | `333oh` | |
+| 2x2 | `222so` | `222o`, `2223`, `222nb` |
+| 4x4 | `444wca` | `444m`, `444`, `444yj` |
+| 5x5 | `555wca` | `555` |
+| 6x6 | `666wca` | `666si`, `666p`, `666s` |
+| 7x7 | `777wca` | `777si`, `777p`, `777s` |
+| Pyraminx | `pyrso` | `pyro`, `pyrm`, `pyrnb` |
+| Skewb | `skbso` | `skbo`, `skb`, `skbnb` |
+| Megaminx | `mgmp` | `mgmc`, `mgmo`, `mgmso` |
+| Square-1 | `sqrs` | `sq1h`, `sq1t` |
+| Clock | `clkwca` | `clkwcab`, `clknf`, `clk`, `clko`, `clkc`, `clke` |
+
+One-handed is `333oh` rather than `333`, which is what keeps a one-handed session from
+merging into two-handed times when the file travels. A test walks `Puzzle::ALL` and asserts
+every event survives its own scramble type, so a thirteenth event cannot be added without
+one.
+
+**Anything else is skipped, not guessed.** Every case trainer, every blindfolded type,
+fewest moves, and every puzzle Cubetimer has no event for produce no session and increment
+`Import::skipped`, which the status line reports. Filing 3x3 blindfolded solves under 3x3
+would put minute-long times into an ao12 that never meant to hold them, and a session
+quietly absorbed into the wrong event is harder to notice, and to undo, than one that never
+arrived. A session whose solve list cannot be read at all is skipped the same way, while a
+single unreadable solve inside a readable list is dropped and the rest of the session is
+kept. A session naming no scramble type at all is 3x3, which is csTimer's own default.
 
 ---
 
