@@ -41,6 +41,11 @@ The timer changes colour to tell you what it wants. White means idle, red means
 you are holding but not there yet, green means let go, cyan means you are
 solving, and yellow is the inspection countdown.
 
+A marker and a highlighted row in the times list show which solve you have
+selected, and the panel title counts it for you: `times 12/87` means the
+selected row is solve number 12 of the 87 in the session. The list numbers
+solves the way it stacks them, oldest as 1 and newest at the top.
+
 On a narrow or short terminal the times column and the stats strip drop away so
 the timer itself stays readable. Widen the window and they come back.
 
@@ -67,18 +72,45 @@ green, nothing starts and you are back where you were.
 ## Inspection
 
 Turn on WCA inspection with `/inspect`, and the top border will start reading
-`inspection: on`. Running it again turns it back off.
+`inspection: on`. Running it again turns it back off. The setting is written to
+your save file, so whichever way you leave it is how Cubetimer starts next time.
 
 With inspection on, one step slots in ahead of everything else. Tap space and a
 15 second countdown starts in yellow. Inspect the cube, then hold space and
 release exactly as before to start the solve. `Esc` backs out of a countdown if
 you change your mind.
 
+A judge at a competition calls out "8 seconds" and "12 seconds" while you
+inspect, and Cubetimer marks both silently. At 8 seconds the countdown turns
+light magenta and `8s` appears in the small line under the digits; at 12 seconds
+it turns light red and that line reads `12s`. The colour is the part you catch
+without looking away from the cube, and the caption is there when you do look.
+
 The penalties are applied for you, so there is nothing to remember afterwards.
 Going past 15 seconds turns the solve into a +2, and going past 17 seconds makes
-it a DNF. Either way the timer shows what you have earned in red while the
-countdown is still on screen, and the solve is recorded with that penalty
-already attached.
+it a DNF. Either way the countdown turns red and the same small line switches
+from the judge call to `+2` or `DNF`, so a penalty you have already earned is
+never mistaken for a call, and the solve is recorded with that penalty already
+attached.
+
+## Looking back at a solve
+
+The arrow keys move a selection through the times list, `PgUp` and `PgDn` jump
+ten at a time, and `Home` takes you straight back to your newest solve. Press
+`Enter` on the one you want and a popup opens with the solve in full: the time
+with its penalty, the date it was set in UTC, and the whole scramble it was done
+on, wrapped to fit and tall enough for all seven of Megaminx's lines.
+
+Inside that popup, `r` loads its scramble back as your current one so you can
+have another go at exactly the same case, and `Esc` or `Enter` closes it. The
+popup opens from an idle timer only, so `Enter` can never interrupt a solve.
+
+## Hiding the running time
+
+Some people solve faster when they cannot see the clock racing. `/hidetime`
+replaces the running digits with `...` while you solve, and the final time
+appears as usual the moment you stop. Run it again to bring the running clock
+back. Like inspection, the setting is remembered between runs.
 
 ## Keys
 
@@ -88,11 +120,13 @@ already attached.
 | any key | stops a running timer |
 | `n` | new scramble |
 | `/` | opens the command line |
-| `↑` `↓` or `k` `j` | scroll the times list one solve at a time |
-| `PgUp` `PgDn` | scroll the times list ten at a time |
-| `Home` | jump the times list back to your newest solve |
+| `↑` `↓` or `k` `j` | move the times-list selection one solve at a time |
+| `PgUp` `PgDn` | move the times-list selection ten at a time |
+| `Home` | jump the times-list selection back to your newest solve |
+| `Enter` | open the selected solve in full; `r` inside loads its scramble |
 | `h` or `?` | open and close the help overlay |
-| `Esc` | cancel inspection, close the help, leave the command line, clear the status line |
+| arrows, `PgUp` `PgDn`, `Home` | inside `/sessions`, move the cursor; `Enter` switches |
+| `Esc` | cancel inspection, close a popup, leave the command line, clear the status line |
 | `q` | quit |
 
 `Ctrl+C` also quits, from anywhere, if you ever need it.
@@ -107,24 +141,31 @@ spaces do not matter.
 |---|---|
 | `/2x2` `/3x3` `/4x4` `/5x5` `/6x6` `/7x7` | switch to that puzzle's default session (see below) |
 | `/pyraminx` `/skewb` `/megaminx` `/sq1` `/clock` | the same, for the five non-cube events |
+| `/oh` | the same, for 3x3 one-handed |
 | `/new [name]` | start a new session for the current puzzle |
-| `/sessions` | list every session with its id, puzzle and solve count |
+| `/sessions` | open a picker listing every session with its id, puzzle and solve count |
 | `/session <id>` | switch to a session by id |
 | `/rename <name>` | rename the session you are in |
 | `/delsession [id]` | delete a session and its solves, current one by default |
 | `/dnf` `/+2` `/ok` | set or clear the penalty on your last solve |
-| `/del` | delete your last solve |
+| `/del [n]` | delete solve number `n`, or your newest solve if you leave `n` off |
 | `/inspect` | turn 15 second inspection on or off |
+| `/hidetime` | hide or show the running time while you solve |
 | `/help` | open and close the help overlay |
 | `/quit` or `/q` | quit |
 
 The longer puzzle names have short forms: `/pyra` for `/pyraminx`, `/mega` for
-`/megaminx`, and `/square1` or `/square-1` for `/sq1`.
+`/megaminx`, `/square1` or `/square-1` for `/sq1`, and `/3x3oh` for `/oh`.
+
+The number `/del` takes is the one beside the solve in the times list, so
+`/del 1` throws away the oldest solve in the session and `/del` on its own takes
+the newest. A number nothing matches, or something that is not a number at all,
+just says so on the status line and changes nothing.
 
 ## Sessions and puzzles
 
 A session is just an ordered list of solves for one puzzle, with a name and an
-id. Every save file has eleven permanent ones called `default`, one per puzzle:
+id. Every save file has twelve permanent ones called `default`, one per puzzle:
 
 | id | puzzle | id | puzzle |
 |---|---|---|---|
@@ -133,18 +174,37 @@ id. Every save file has eleven permanent ones called `default`, one per puzzle:
 | 3 | 4x4 | 9 | megaminx |
 | 4 | 5x5 | 10 | sq1 |
 | 5 | 6x6 | 11 | clock |
-| 6 | 7x7 | | |
+| 6 | 7x7 | 12 | oh |
+
+One-handed is its own event with its own session and its own personal bests,
+even though `/oh` hands you an ordinary 3x3 scramble, because a one-handed 12
+and a two-handed 12 are not the same achievement.
 
 Their solves are yours to penalise and delete as usual, but the sessions
 themselves cannot be renamed, retyped or deleted, so `/4x4` always has somewhere
 to land. `/new` gives you as many sessions of your own as you want, with ids
-from 12 up, and without a name they are numbered for you.
+from 13 up, and without a name they are numbered for you.
+
+`/sessions` shows the lot in a popup you pick from, one row each, with the
+twelve `default` names dimmed so your own stand out and a `>` beside the session
+you are in. The cursor starts on that row. The arrow keys and `k` `j` move it one
+row at a time, `PgUp` and `PgDn` ten, and `Home` goes to the top; `Enter`
+switches to the session under the cursor and closes the popup, and `Esc` closes
+it without changing anything. Choosing the session you are already in is a no-op,
+so the scramble in front of you survives.
+
+Nothing behind the popup responds while it is open, not even the space bar, so
+there is no way to start a solve by accident while you are choosing. On a
+terminal too short to hold every row the list scrolls under the cursor, and the
+title counts your position, as in `sessions 14/20`.
 
 A save file written by an older Cubetimer is brought up to this layout when it
 is read, however far back it came from. The old `default` session keeps its
 solves and becomes the default for its puzzle, and anything else you had made
 keeps its name and times, moving to a new id if the one it held is now reserved
-for one of the new events.
+for one of the new events. Adding one-handed took id 12, for instance, so a
+session of yours that used to sit there is now id 13, and nothing you recorded
+in it is lost.
 
 Puzzle switching is built around one rule: a session that has solves in it never
 changes puzzle, because that would mix two events into one set of stats. So
@@ -160,7 +220,7 @@ you in the same two places every time.
 `/delsession` throws a session away along with its solves. With no argument it
 takes the one you are in, and with an id it takes that one, so you can clear out
 a session without switching to it first. Deleting the session you are in leaves
-you on the default for its puzzle. The eleven defaults are refused.
+you on the default for its puzzle. The twelve defaults are refused.
 
 ## Where your times live
 
@@ -187,19 +247,34 @@ you the path rather than starting fresh over the top of it.
 
 Your averages follow WCA rules. An ao5 or ao12 throws out the best and the worst
 solve and takes the mean of what is left; an ao100 throws out the best five and
-the worst five. A DNF always counts as the worst solve in the window, so a single
-DNF in an ao5 is absorbed by the trim, and a second one turns the whole average
-into a DNF. When there are not enough solves yet, the average shows as a dash.
+the worst five, and an ao1000 throws out fifty at each end. A DNF always counts
+as the worst solve in the window, so a single DNF in an ao5 is absorbed by the
+trim, and a second one turns the whole average into a DNF. When there are not
+enough solves yet, the average shows as a dash.
+
+The mo3 is the odd one out and deliberately so. It is a plain mean of your last
+three solves with nothing trimmed, which is how the WCA scores the big cubes, so
+there is no discarded slot for a DNF to hide in: one DNF anywhere in those three
+and the mo3 reads `DNF`.
 
 A `+2` adds two seconds to the raw time, and everything downstream uses that
 penalised time. Times are truncated to centiseconds rather than rounded, WCA
 style, so 12.349 shows as `12.34`.
 
-The `best`, `worst` and `mean` figures in the stats strip cover the session you
-are in and ignore DNFs. The personal bests are wider: PB single, PB ao5, PB ao12
-and PB ao100 are the best you have ever done across every session of the puzzle
-you are currently on, and the rolling averages behind them are searched within
-each session rather than across the seam between two of them.
+The stats strip reads in three rows, and the first and last say which is which:
+`current` labels your rolling `mo3 ao5 ao12 ao100 ao1000`, and `best` labels the
+same five windows at the best you have ever done them. The middle row, between
+the two, is `best single worst single mean solves` for the session you are in. It
+carries no label of its own but is still indented to the same column, so all
+three rows start their numbers in the same place and a rolling average sits
+directly above its personal best. The middle row's figures cover the current
+session only and ignore DNFs, and its two singles are spelled out in full,
+`best single` and `worst single`, so neither reads as a row label. The personal
+bests are the best you have ever done across every session of the puzzle you are
+currently on, and the rolling windows behind them are searched within each
+session rather than across the seam between two of them. On a narrow terminal a
+row drops entries from the right rather than wrapping, so the numbers you look at
+most stay put.
 
 ## Scrambles
 
@@ -227,6 +302,9 @@ being plain about it:
   state and solved back into moves; Cubetimer picks the moves and takes whatever
   state comes out. The lengths match real scrambles and they are perfectly good
   to train on, but they are not competition-legal.
+- **One-handed** is 3x3, scrambled by the very same generator and inheriting
+  exactly the same caveat. The WCA scrambles it the same way; the event is the
+  hand you are not using, not the cube.
 
 Megaminx scrambles run to seven lines, and the scramble area at the top of the
 screen grows to fit them, up to a point: it will not eat so much of the window
