@@ -57,7 +57,7 @@ is what makes the degradation rules testable as ordinary functions rather than b
 | `mod.rs` | `draw`, the palette, `panel`, the header, stats, times list and status line | 367 |
 | `timer.rs` | `timer_view`, `draw_timer`, `GLYPH_H` and the 5-row block font | 181 |
 | `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 238 |
-| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, popup placement | 236 |
+| `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, popup placement | 239 |
 
 `src/app/` splits by question asked. `mod.rs` is the state machine: timer states, key
 handling, `on_tick`, and `refresh_derived`. `commands.rs` is command mode, entered through
@@ -771,9 +771,9 @@ times column:
 │                                          │  ...                        │
 │              (dim state caption)         │                             │
 ├─ stats ──────────────────────────────────┤                             │
-│ now  mo3 12.80   ao5 12.99   ao12 13.45  │                             │
-│      best 9.87   worst 18.20   mean 13.2 │                             │
-│ pb   single 9.87   mo3 11.02   ao5 11.20 │                             │
+│current mo3 12.80   ao5 12.99   ao12 13.45│                             │
+│        best single 9.87                  │                             │
+│best    mo3 11.02   ao5 11.20   ao12 12.02│                             │
 ├──────────────────────────────────────────┴─────────────────────────────┤
 │ space hold+release: start · /: commands · n: new scramble · h: help    │
 └────────────────────────────────────────────────────────────────────────┘
@@ -792,18 +792,26 @@ panic and without a blank screen:
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
 - **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0. Its
-  three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (3)
-  plus a space: `now` over `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
-  `best worst mean solves`, then `pb` over the personal bests. The middle row pays for the
+  three text rows are fixed and each opens with a dim prefix column of `STAT_PREFIX_W` (7,
+  the width of `current`, the longest of the three prefixes) plus a space: `current` over
+  `mo3 ao5 ao12 ao100 ao1000`, then an empty prefix over
+  `best single, worst single, mean, solves`, then `best` over the same five windows again,
+  this time the all-time personal bests from `App::pbs`. The middle row pays for the
   column it does not use, because the three only read as a block if their values start in
   the same place, and `stat_budget` is where that toll is taken out of the width before
   anything is packed. A row never wraps into the one below it, so `fit_count` decides how
   many entries survive the remaining budget and the rest are dropped from the right. Each
   averages row runs smallest window first, which is also the order in which the numbers
   start existing as a session grows, so what a narrow terminal keeps is what a short session
-  actually has. The prefixes are what make the two labelled rows readable against each
-  other: at 80 columns the `pb` row now holds three entries, which is exactly the span the
-  `now` row above it holds.
+  actually has. Every label is unambiguous on its own: `current` and `best` are the two rows,
+  the top and bottom rows hold nothing but averages so a rolling one sits directly over its
+  personal best, and the session's own extremes in the middle spell out `best single` and
+  `worst single` rather than borrowing a row name. The wider prefix costs each row four
+  columns of budget. At 80 the strip is 52 columns wide and each row packs into 44, which
+  holds four averages or two of the longer session entries; by 44 columns the strip is 22
+  wide, every row is down to the one entry `fit_count` will never drop, and
+  `best single 9.87` is wide enough that the paragraph clips it, which is the intended
+  degradation: a clipped number still says more than a blank row.
 - **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold
