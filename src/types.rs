@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Save-file format this build writes. `storage::load` migrates anything older and refuses anything newer.
-pub const SAVE_VERSION: u32 = 3;
-/// First id a user-created session can take: ids 1 through 11 are the permanent per-puzzle defaults.
-pub const FIRST_USER_ID: u64 = 12;
+pub const SAVE_VERSION: u32 = 4;
+/// First id a user-created session can take: ids 1 through 12 are the permanent per-puzzle defaults.
+pub const FIRST_USER_ID: u64 = 13;
 
 /// The puzzle events the timer supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,10 +32,13 @@ pub enum Puzzle {
     Square1,
     #[serde(rename = "clock")]
     Clock,
+    /// 3x3 One-Handed: the same puzzle and the same scrambles as 3x3, timed as its own event.
+    #[serde(rename = "oh")]
+    Oh,
 }
 
 impl Puzzle {
-    pub const ALL: [Puzzle; 11] = [
+    pub const ALL: [Puzzle; 12] = [
         Puzzle::Cube2,
         Puzzle::Cube3,
         Puzzle::Cube4,
@@ -47,10 +50,11 @@ impl Puzzle {
         Puzzle::Megaminx,
         Puzzle::Square1,
         Puzzle::Clock,
+        Puzzle::Oh,
     ];
 
     /// The puzzles in default-session order, so `DEFAULT_ORDER[n]` owns id `n + 1`.
-    pub const DEFAULT_ORDER: [Puzzle; 11] = [
+    pub const DEFAULT_ORDER: [Puzzle; 12] = [
         Puzzle::Cube3,
         Puzzle::Cube2,
         Puzzle::Cube4,
@@ -62,6 +66,7 @@ impl Puzzle {
         Puzzle::Megaminx,
         Puzzle::Square1,
         Puzzle::Clock,
+        Puzzle::Oh,
     ];
 
     /// Fixed id of this puzzle's permanent default session. 3x3 comes first because it is the common case.
@@ -78,6 +83,7 @@ impl Puzzle {
             Puzzle::Megaminx => 9,
             Puzzle::Square1 => 10,
             Puzzle::Clock => 11,
+            Puzzle::Oh => 12,
         }
     }
 
@@ -95,6 +101,7 @@ impl Puzzle {
             Puzzle::Megaminx => "megaminx",
             Puzzle::Square1 => "sq1",
             Puzzle::Clock => "clock",
+            Puzzle::Oh => "oh",
         }
     }
 
@@ -112,6 +119,7 @@ impl Puzzle {
             "megaminx" | "mega" => Some(Puzzle::Megaminx),
             "sq1" | "square1" | "square-1" => Some(Puzzle::Square1),
             "clock" => Some(Puzzle::Clock),
+            "oh" | "3x3oh" => Some(Puzzle::Oh),
             _ => None,
         }
     }
@@ -175,10 +183,24 @@ impl Session {
         }
     }
 
-    /// True for the eleven permanent defaults, which can never be deleted, renamed or retyped.
+    /// True for the twelve permanent defaults, which can never be deleted, renamed or retyped.
     pub fn is_default(&self) -> bool {
         self.id < FIRST_USER_ID
     }
+}
+
+/// User preferences that outlive a run.
+///
+/// Every field carries `serde(default)`, so a save file written before the setting existed
+/// parses into the same value a fresh install would get.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Settings {
+    /// Whether the 15-second WCA inspection countdown runs before each solve.
+    #[serde(default)]
+    pub inspection: bool,
+    /// Whether the running time is hidden until the solve ends.
+    #[serde(default)]
+    pub hide_time: bool,
 }
 
 /// Root of the persisted data file.
@@ -187,10 +209,13 @@ pub struct SaveFile {
     pub version: u32,
     /// Monotonic counter for session ids, never below [`FIRST_USER_ID`].
     pub next_session_id: u64,
-    /// Every session, the eleven permanent defaults (ids 1 through 11) first.
+    /// Every session, the twelve permanent defaults (ids 1 through 12) first.
     pub sessions: Vec<Session>,
     /// Id of the session that was active when the app last ran.
     pub active_session_id: u64,
+    /// Preferences. Absent in files written before version 4, hence the default.
+    #[serde(default)]
+    pub settings: Settings,
 }
 
 impl Default for SaveFile {
@@ -203,6 +228,7 @@ impl Default for SaveFile {
                 .map(Session::default_for)
                 .collect(),
             active_session_id: Puzzle::Cube3.default_session_id(),
+            settings: Settings::default(),
         }
     }
 }
@@ -226,6 +252,41 @@ pub fn format_solve(s: &Solve) -> String {
         Penalty::Plus2 => format!("{}+", format_millis(s.millis.saturating_add(2000))),
         Penalty::Dnf => format!("DNF({})", format_millis(s.millis)),
     }
+}
+
+/// Format Unix epoch milliseconds as "2026-08-01 09:14 UTC".
+///
+/// UTC only, and no dependency: a timestamp comes off a hand-editable JSON file, so the
+/// arithmetic is done in `u64` with no subtraction that can wrap and no value that can
+/// overflow, and `u64::MAX` yields an absurd year rather than a panic.
+pub fn format_timestamp(epoch_ms: u64) -> String {
+    let secs = epoch_ms / 1_000;
+    let days = secs / 86_400;
+    let second_of_day = secs % 86_400;
+    let (hour, minute) = (second_of_day / 3_600, (second_of_day % 3_600) / 60);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Days since the Unix epoch to a (year, month, day) civil date, by Howard Hinnant's algorithm.
+///
+/// Shifting the epoch to 0000-03-01 puts the leap day at the end of the year, which is what
+/// removes every special case from the month arithmetic. The 719468 offset is the distance
+/// between that epoch and 1970-01-01.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days.saturating_add(719_468);
+    let era = z / 146_097;
+    // Day of era, always in 0..=146096, which bounds every quantity below.
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    // March-based month index, 0..=11.
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    // January and February belong to the following calendar year.
+    (year + u64::from(month <= 2), month, day)
 }
 
 #[cfg(test)]
@@ -303,5 +364,87 @@ mod tests {
         assert_eq!(solve(10_000, Penalty::None).effective_millis(), Some(10_000));
         assert_eq!(solve(10_000, Penalty::Plus2).effective_millis(), Some(12_000));
         assert_eq!(solve(10_000, Penalty::Dnf).effective_millis(), None);
+    }
+
+    // ---- format_timestamp
+
+    #[test]
+    fn format_timestamp_renders_the_epoch_itself() {
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00 UTC");
+        assert_eq!(format_timestamp(999), "1970-01-01 00:00 UTC");
+    }
+
+    #[test]
+    fn format_timestamp_renders_a_known_date() {
+        // 2026-08-01 09:14:00 UTC.
+        assert_eq!(format_timestamp(1_785_575_640_000), "2026-08-01 09:14 UTC");
+        // 2023-11-14 22:13:20 UTC, the timestamp the storage fixtures use.
+        assert_eq!(format_timestamp(1_700_000_000_000), "2023-11-14 22:13 UTC");
+    }
+
+    #[test]
+    fn format_timestamp_handles_leap_days_and_year_boundaries() {
+        assert_eq!(format_timestamp(951_782_400_000), "2000-02-29 00:00 UTC");
+        assert_eq!(format_timestamp(1_583_020_800_000), "2020-03-01 00:00 UTC");
+        assert_eq!(format_timestamp(1_735_689_599_000), "2024-12-31 23:59 UTC");
+        assert_eq!(format_timestamp(1_735_689_600_000), "2025-01-01 00:00 UTC");
+    }
+
+    #[test]
+    fn format_timestamp_survives_an_absurd_value() {
+        // Straight off a hand-edited file: an implausible year is fine, a panic is not.
+        let far = format_timestamp(u64::MAX);
+        assert!(far.ends_with(" UTC"), "got {far}");
+        assert!(!format_timestamp(u64::MAX - 1).is_empty());
+    }
+
+    // ---- settings
+
+    #[test]
+    fn settings_start_out_off() {
+        let s = Settings::default();
+        assert!(!s.inspection);
+        assert!(!s.hide_time);
+        assert_eq!(SaveFile::default().settings, s);
+    }
+
+    // ---- the puzzle table
+
+    #[test]
+    fn every_puzzle_has_its_own_default_session_id() {
+        let mut ids: Vec<u64> = Puzzle::ALL.iter().map(|p| p.default_session_id()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=Puzzle::ALL.len() as u64).collect::<Vec<_>>());
+        assert_eq!(FIRST_USER_ID, Puzzle::ALL.len() as u64 + 1);
+        assert_eq!(Puzzle::DEFAULT_ORDER.len(), Puzzle::ALL.len());
+        for (i, puzzle) in Puzzle::DEFAULT_ORDER.into_iter().enumerate() {
+            assert_eq!(puzzle.default_session_id(), i as u64 + 1);
+        }
+    }
+
+    #[test]
+    fn every_puzzle_name_round_trips_through_from_name() {
+        for puzzle in Puzzle::ALL {
+            assert_eq!(Puzzle::from_name(puzzle.name()), Some(puzzle));
+            assert_eq!(Puzzle::from_name(&puzzle.name().to_uppercase()), Some(puzzle));
+        }
+    }
+
+    #[test]
+    fn one_handed_is_named_oh_and_accepts_its_alias() {
+        assert_eq!(Puzzle::Oh.name(), "oh");
+        assert_eq!(Puzzle::from_name("oh"), Some(Puzzle::Oh));
+        assert_eq!(Puzzle::from_name("3x3oh"), Some(Puzzle::Oh));
+        assert_eq!(Puzzle::from_name("3X3OH"), Some(Puzzle::Oh));
+        assert_eq!(Puzzle::from_name("3x3"), Some(Puzzle::Cube3), "still the two-handed event");
+        assert_eq!(Puzzle::Oh.default_session_id(), 12);
+    }
+
+    #[test]
+    fn one_handed_serializes_under_its_own_tag() {
+        let json = serde_json::to_string(&Puzzle::Oh).expect("serialize");
+        assert_eq!(json, "\"oh\"");
+        let back: Puzzle = serde_json::from_str("\"oh\"").expect("deserialize");
+        assert_eq!(back, Puzzle::Oh);
     }
 }

@@ -2,21 +2,21 @@
 //!
 //! Every value shown is already on `App`, including the statistics: this runs on the 15 ms
 //! tick, so it reads and never computes. The geometry lives in [`layout`], and is saturating
-//! throughout so tiny terminals degrade instead of panicking.
+//! throughout so tiny terminals degrade instead of panicking. The popups drawn on top of the
+//! frame live in [`overlay`].
 
 mod layout;
+mod overlay;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, InputMode, TimerState};
-use crate::types::{format_millis, format_solve, Penalty, Puzzle};
-use layout::{
-    centered, footer_height, header_height, inner_of, puzzle_help_rows, HELP_KEY_W, HELP_W,
-};
+use crate::types::{format_millis, format_solve, Penalty};
+use layout::{fit_count, footer_height, header_height, inner_of, times_window, STAT_SEP};
 
 // ---------------------------------------------------------------- palette
 
@@ -29,6 +29,13 @@ const C_LABEL: Color = Color::DarkGray;
 const C_ACCENT: Color = Color::Magenta;
 const C_BEST: Color = Color::Green;
 const C_WORST: Color = Color::Red;
+/// Inspection past eight seconds.
+const C_STAGE1: Color = Color::LightMagenta;
+/// Inspection past twelve seconds.
+const C_STAGE2: Color = Color::LightRed;
+
+/// Stands in for the running time when `hide_time` is on; the block font has a `'.'` glyph.
+const HIDDEN_TIME: &str = "...";
 
 fn dim() -> Style {
     Style::default().fg(C_LABEL)
@@ -72,8 +79,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_status(frame, app, rows[2]);
     }
 
-    if app.show_help {
-        draw_help(frame, area);
+    // One overlay at a time, and the detail popup is the one the user just asked for.
+    if let Some(index) = app.solve_detail {
+        overlay::draw_detail(frame, app, index, area);
+    } else if app.show_help {
+        overlay::draw_help(frame, area);
     }
 }
 
@@ -89,7 +99,11 @@ fn draw_scramble(frame: &mut Frame, app: &App, area: Rect) {
         session.puzzle.name(),
         session.name,
         session.id,
-        if app.inspection_enabled { "on" } else { "off" }
+        if app.save.settings.inspection {
+            "on"
+        } else {
+            "off"
+        }
     );
 
     let scramble_style = Style::default()
@@ -165,13 +179,19 @@ fn timer_view(app: &App) -> (String, Color, Option<String>, &'static str) {
         ),
         TimerState::Inspecting { .. } => {
             let remaining = app.inspection_remaining.unwrap_or(15);
+            // The stage is decided by `app`, so the two warning colours cannot drift from it.
+            let stage_color = match app.inspection_stage {
+                0 => C_INSPECT,
+                1 => C_STAGE1,
+                _ => C_STAGE2,
+            };
             // `remaining` counts 15..0 then negative: <= 0 is past 15s (+2), <= -2 is past 17s (DNF).
             let (penalty, color) = if remaining <= -2 {
                 (Some("DNF".to_string()), Color::Red)
             } else if remaining <= 0 {
                 (Some("+2".to_string()), Color::Red)
             } else {
-                (None, C_INSPECT)
+                (None, stage_color)
             };
             let shown = if remaining > 0 { remaining } else { 0 };
             (shown.to_string(), color, penalty, "inspecting")
@@ -193,12 +213,16 @@ fn timer_view(app: &App) -> (String, Color, Option<String>, &'static str) {
                 )
             }
         }
-        TimerState::Timing { .. } => (
-            format_millis(app.display_millis),
-            C_TIMING,
-            None,
-            "solving, any key stops",
-        ),
+        TimerState::Timing { .. } => {
+            // Hiding the running time is a practice aid, so only the run itself is masked:
+            // the result is on screen the moment the timer stops.
+            let shown = if app.save.settings.hide_time {
+                HIDDEN_TIME.to_string()
+            } else {
+                format_millis(app.display_millis)
+            };
+            (shown, C_TIMING, None, "solving, any key stops")
+        }
     }
 }
 
@@ -303,13 +327,36 @@ fn opt_time(v: Option<u64>) -> String {
     v.map(format_millis).unwrap_or_else(|| "-".to_string())
 }
 
-fn stat_span<'a>(label: &'a str, value: String, color: Color) -> Vec<Span<'a>> {
-    vec![
-        Span::styled(label, dim()),
-        Span::raw(" "),
-        Span::styled(value, Style::default().fg(color)),
-        Span::raw("   "),
-    ]
+/// One row of the stats strip: `label value` entries packed left to right into `width` columns.
+///
+/// The strip has three rows and no more, so a row that cannot hold everything it was given
+/// drops entries from the right rather than wrapping into the row below.
+fn stat_row(
+    prefix: Option<&'static str>,
+    entries: Vec<(&'static str, String, Color)>,
+    width: u16,
+) -> Line<'static> {
+    let lead = prefix.map_or(0u16, |p| p.chars().count().saturating_add(1) as u16);
+    let widths: Vec<usize> = entries
+        .iter()
+        .map(|(label, value, _)| label.chars().count() + 1 + value.chars().count())
+        .collect();
+    let keep = fit_count(&widths, width.saturating_sub(lead));
+
+    let mut spans: Vec<Span> = Vec::new();
+    if let Some(p) = prefix {
+        spans.push(Span::styled(p, dim()));
+        spans.push(Span::raw(" "));
+    }
+    for (i, (label, value, color)) in entries.into_iter().take(keep).enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(" ".repeat(STAT_SEP)));
+        }
+        spans.push(Span::styled(label, dim()));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(value, Style::default().fg(color)));
+    }
+    Line::from(spans)
 }
 
 fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
@@ -318,38 +365,51 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     }
     let st = &app.stats;
     let pb = &app.pbs;
+    let width = area.width.saturating_sub(2);
 
-    let mut l1: Vec<Span> = Vec::new();
-    l1.extend(stat_span("ao5", st.ao5.display(), C_TIMING));
-    l1.extend(stat_span("ao12", st.ao12.display(), C_TIMING));
-    l1.extend(stat_span("ao100", st.ao100.display(), C_TIMING));
+    let averages = stat_row(
+        None,
+        vec![
+            ("mo3", st.mo3.display(), C_TIMING),
+            ("ao5", st.ao5.display(), C_TIMING),
+            ("ao12", st.ao12.display(), C_TIMING),
+            ("ao100", st.ao100.display(), C_TIMING),
+            ("ao1000", st.ao1000.display(), C_TIMING),
+        ],
+        width,
+    );
+    let session = stat_row(
+        None,
+        vec![
+            ("best", opt_time(st.best), C_BEST),
+            ("worst", opt_time(st.worst), C_WORST),
+            ("mean", opt_time(st.mean), C_IDLE),
+            (
+                "solves",
+                format!("{} ({} ok)", st.count, st.valid_count),
+                C_IDLE,
+            ),
+        ],
+        width,
+    );
+    let bests = stat_row(
+        Some("pb"),
+        vec![
+            ("single", opt_time(pb.single), C_ACCENT),
+            ("mo3", opt_time(pb.mo3), C_ACCENT),
+            ("ao5", opt_time(pb.ao5), C_ACCENT),
+            ("ao12", opt_time(pb.ao12), C_ACCENT),
+            ("ao100", opt_time(pb.ao100), C_ACCENT),
+            ("ao1000", opt_time(pb.ao1000), C_ACCENT),
+        ],
+        width,
+    );
 
-    let mut l2: Vec<Span> = Vec::new();
-    l2.extend(stat_span("best", opt_time(st.best), C_BEST));
-    l2.extend(stat_span("worst", opt_time(st.worst), C_WORST));
-    l2.extend(stat_span("mean", opt_time(st.mean), C_IDLE));
-    l2.extend(stat_span(
-        "solves",
-        format!("{} ({} ok)", st.count, st.valid_count),
-        C_IDLE,
-    ));
-
-    let mut l3: Vec<Span> = Vec::new();
-    l3.extend(stat_span("PB single", opt_time(pb.single), C_ACCENT));
-    l3.extend(stat_span("PB ao5", opt_time(pb.ao5), C_ACCENT));
-    l3.extend(stat_span("PB ao12", opt_time(pb.ao12), C_ACCENT));
-    l3.extend(stat_span("PB ao100", opt_time(pb.ao100), C_ACCENT));
-
-    let p = Paragraph::new(Text::from(vec![
-        Line::from(l1),
-        Line::from(l2),
-        Line::from(l3),
-    ]))
-    .block(panel("stats"));
+    let p = Paragraph::new(Text::from(vec![averages, session, bests])).block(panel("stats"));
     frame.render_widget(p, area);
 }
 
-// ------------------------------------- times list (newest first, scrollable)
+// ---------------------------- times list (newest first, with a selection)
 
 fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -359,11 +419,13 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
     let total = solves.len();
     let best = app.stats.best;
     let worst = app.stats.worst;
+    let selected = app.times_selected.min(total.saturating_sub(1));
 
     let title = if total == 0 {
         "times".to_string()
-    } else if app.times_scroll > 0 {
-        format!("times ({}) ↑{}", total, app.times_scroll)
+    } else if selected > 0 {
+        // The selected solve's own number over the session total, so the depth reads at a glance.
+        format!("times {}/{}", total - selected, total)
     } else {
         format!("times ({})", total)
     };
@@ -381,15 +443,15 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let rows = inner.height as usize;
-    // Newest first; times_scroll counts entries hidden off the top.
-    let skip = app.times_scroll.min(total.saturating_sub(1));
-    let mut lines: Vec<Line> = Vec::with_capacity(rows);
+    // Newest first, so both ends of the window count from the newest solve.
+    let (start, len) = times_window(selected, total, inner.height as usize);
+    let mut lines: Vec<Line> = Vec::with_capacity(len);
 
-    for (offset, solve) in solves.iter().rev().skip(skip).take(rows).enumerate() {
-        let number = total.saturating_sub(skip).saturating_sub(offset);
+    for (offset, solve) in solves.iter().rev().skip(start).take(len).enumerate() {
+        let index = start + offset;
+        let number = total.saturating_sub(index);
         let eff = solve.effective_millis();
-        let style = if solve.penalty == Penalty::Dnf {
+        let mut style = if solve.penalty == Penalty::Dnf {
             Style::default().fg(C_WORST).add_modifier(Modifier::DIM)
         } else if total > 1 && eff.is_some() && eff == best {
             Style::default().fg(C_BEST).add_modifier(Modifier::BOLD)
@@ -398,8 +460,20 @@ fn draw_times(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(C_IDLE)
         };
+        let mut number_style = dim();
+        let marker = if index == selected {
+            // Reversed rather than recoloured, so best-green and worst-red still read on it;
+            // DIM loses its foreground once the colours swap, so it comes off first.
+            style = style
+                .remove_modifier(Modifier::DIM)
+                .add_modifier(Modifier::REVERSED);
+            number_style = Style::default().fg(C_IDLE).add_modifier(Modifier::REVERSED);
+            '>'
+        } else {
+            ' '
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("{:>3} ", number), dim()),
+            Span::styled(format!("{}{:>3} ", marker, number), number_style),
             Span::styled(format_solve(solve), style),
         ]));
     }
@@ -438,88 +512,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(p, area);
 }
 
-// ----------------------------------------------------------- help overlay
+// ------------------------------------------------------- test scaffolding
 
-fn help_row<'a>(key: &'a str, desc: &'a str) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(
-            format!("  {:<width$}", key, width = HELP_KEY_W),
-            Style::default().fg(C_TIMING).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(desc, Style::default().fg(C_IDLE)),
-    ])
-}
-
-fn help_head(text: &str) -> Line<'_> {
-    Line::styled(
-        text,
-        Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-    )
-}
-
-fn draw_help(frame: &mut Frame, area: Rect) {
-    // Kept in sync with the supported puzzles rather than hard-coded.
-    let names: Vec<&str> = Puzzle::ALL.iter().map(|p| p.name()).collect();
-    let puzzle_rows = puzzle_help_rows(&names);
-
-    let mut lines: Vec<Line> = vec![
-        help_head(" keys"),
-        help_row("space", "hold until green, release to start"),
-        help_row("any key", "stop the running timer"),
-        help_row("esc", "cancel inspection / leave command mode"),
-        help_row("n", "new scramble"),
-        help_row("↑ / ↓", "scroll the times list"),
-        help_row("h / ?", "toggle this help"),
-        help_row("/", "command mode"),
-        help_row("q", "quit"),
-        Line::from(""),
-        help_head(" commands"),
-    ];
-    for (i, row) in puzzle_rows.iter().enumerate() {
-        lines.push(help_row(if i == 0 { "/<puzzle>" } else { "" }, row));
-    }
-    lines.extend([
-        help_row("/new [name]", "new session for the current puzzle"),
-        help_row("/sessions", "list all sessions"),
-        help_row("/session <id>", "switch to session by id"),
-        help_row("/rename <name>", "rename the current session"),
-        help_row("/delsession", "delete a session by id (default: current)"),
-        help_row("/del", "delete the last solve"),
-        help_row("/dnf  /+2  /ok", "set the last solve's penalty"),
-        help_row("/inspect", "toggle 15s inspection (off by default)"),
-        help_row("/help", "toggle this help"),
-        help_row("/quit  /q", "quit"),
-        Line::from(""),
-        Line::styled("  press h, ? or esc to close", dim()),
-    ]);
-
-    // The popup follows the content, which grows with the number of puzzles.
-    let content_h = lines.len().min(u16::MAX as usize) as u16;
-    let popup = centered(HELP_W, content_h.saturating_add(2), area);
-    if popup.width < 4 || popup.height < 4 {
-        return;
-    }
-
-    frame.render_widget(Clear, popup);
-    let p = Paragraph::new(Text::from(lines)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(C_ACCENT))
-            .title(" help "),
-    );
-    frame.render_widget(p, popup);
-}
-
-// ------------------------------------------------------------------- tests
-
+/// Shared by the render smoke tests here and in [`overlay`].
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{SaveFile, Solve};
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
-    use std::time::Instant;
+mod testkit {
+    use super::{draw, App};
+    use crate::types::{Penalty, Puzzle, SaveFile, Solve};
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
 
     /// The sizes every smoke test sweeps: comfortable, narrow, short, and absurd.
     const SIZES: [(u16, u16); 4] = [(80, 30), (44, 12), (30, 8), (10, 4)];
@@ -527,12 +528,12 @@ mod tests {
     /// One Megaminx scramble line, and the seven-line block generators emit.
     const MEGA_LINE: &str = "R-- D++ R-- D-- R++ D++ R++ D++ R++ D++ U";
 
-    fn mega() -> String {
+    pub(super) fn mega() -> String {
         [MEGA_LINE; 7].join("\n")
     }
 
     /// An app on `puzzle` with `count` solves recorded, at a path nothing in these tests writes.
-    fn app_with(puzzle: Puzzle, count: usize) -> App {
+    pub(super) fn app_with(puzzle: Puzzle, count: usize) -> App {
         let mut save = SaveFile::default();
         let id = puzzle.default_session_id();
         let session = save
@@ -559,27 +560,48 @@ mod tests {
         )
     }
 
-    /// Draw one frame and return every cell's symbol. Not panicking is most of the assertion.
-    fn render(app: &App, w: u16, h: u16) -> String {
+    /// Draw one frame and return the cell buffer. Not panicking is most of the assertion.
+    pub(super) fn render_buffer(app: &App, w: u16, h: u16) -> Buffer {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
         let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("test terminal");
         terminal
             .draw(|frame| draw(frame, app))
             .expect("draw must not fail");
-        terminal
-            .backend()
-            .buffer()
+        terminal.backend().buffer().clone()
+    }
+
+    /// Draw one frame and return every cell's symbol, row by row.
+    pub(super) fn render(app: &App, w: u16, h: u16) -> String {
+        render_buffer(app, w, h)
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect()
     }
 
+    /// Cells drawn in `color`, the only way to assert a colour that carries meaning.
+    pub(super) fn cells_colored(buffer: &Buffer, color: Color) -> usize {
+        buffer.content().iter().filter(|c| c.fg == color).count()
+    }
+
     /// Draw at all four sizes.
-    fn render_all(app: &App) {
+    pub(super) fn render_all(app: &App) {
         for (w, h) in SIZES {
             render(app, w, h);
         }
     }
+}
+
+// ------------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::testkit::{app_with, cells_colored, mega, render, render_all, render_buffer};
+    use super::*;
+    use crate::types::Puzzle;
+    use std::time::Instant;
 
     #[test]
     fn a_normal_frame_actually_draws_its_chrome() {
@@ -624,12 +646,99 @@ mod tests {
     }
 
     #[test]
-    fn a_times_scroll_past_the_end_renders_at_every_size() {
+    fn a_times_selection_past_the_end_renders_at_every_size() {
         let mut app = app_with(Puzzle::Cube3, 12);
-        app.times_scroll = usize::MAX;
+        app.times_selected = usize::MAX;
         render_all(&app);
-        app.times_scroll = 11;
+        app.times_selected = 11;
         render_all(&app);
+    }
+
+    #[test]
+    fn the_selected_row_is_marked_highlighted_and_counted_in_the_title() {
+        let mut app = app_with(Puzzle::Cube3, 20);
+        app.times_selected = 5;
+        let buffer = render_buffer(&app, 80, 30);
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            text.contains("times 15/20"),
+            "the times panel title must count the selection"
+        );
+        assert!(text.contains("> 15 "), "the selected row carries the marker");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .any(|c| c.modifier.contains(Modifier::REVERSED)),
+            "the selected row is highlighted"
+        );
+
+        // The newest solve is the resting position and reads as a plain count.
+        app.times_selected = 0;
+        let text = render(&app, 80, 30);
+        assert!(text.contains("times (20)"), "no position while on the newest");
+        assert!(!text.contains("> 15 "), "the marker moved with the selection");
+    }
+
+    #[test]
+    fn hiding_the_time_masks_the_running_solve_but_not_the_result() {
+        let mut app = app_with(Puzzle::Cube3, 4);
+        app.state = TimerState::Timing {
+            started: Instant::now(),
+        };
+        app.display_millis = 12_340;
+
+        let visible = render(&app, 80, 30).matches('█').count();
+        app.save.settings.hide_time = true;
+        let hidden = render(&app, 80, 30).matches('█').count();
+        // Three dots are one glyph row of two cells each, and nothing else in the frame is a block.
+        assert_eq!(hidden, 6, "only the three dots survive, got {} blocks", hidden);
+        assert!(visible > hidden, "the digits were drawn before, got {}", visible);
+        render_all(&app);
+
+        // Back in Idle the finished time is on screen as usual.
+        app.state = TimerState::Idle;
+        assert!(render(&app, 80, 30).matches('█').count() > 6);
+    }
+
+    #[test]
+    fn the_inspection_stages_recolour_the_countdown() {
+        let mut app = app_with(Puzzle::Pyraminx, 2);
+        app.state = TimerState::Inspecting {
+            started: Instant::now(),
+        };
+        app.inspection_remaining = Some(5);
+
+        app.inspection_stage = 0;
+        assert_eq!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE1), 0);
+        app.inspection_stage = 1;
+        assert!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE1) > 0);
+        render_all(&app);
+        app.inspection_stage = 2;
+        assert!(cells_colored(&render_buffer(&app, 80, 30), C_STAGE2) > 0);
+        render_all(&app);
+    }
+
+    #[test]
+    fn a_penalty_overrides_the_inspection_stage_colour() {
+        let mut app = app_with(Puzzle::Pyraminx, 2);
+        app.state = TimerState::Inspecting {
+            started: Instant::now(),
+        };
+        app.inspection_stage = 2;
+
+        for (remaining, caption) in [(0i64, "+2"), (-3, "DNF")] {
+            app.inspection_remaining = Some(remaining);
+            let buffer = render_buffer(&app, 80, 30);
+            let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+            assert!(text.contains(caption), "the {} caption is drawn", caption);
+            assert_eq!(
+                cells_colored(&buffer, C_STAGE2),
+                0,
+                "the penalty red must win over the stage colour"
+            );
+        }
     }
 
     #[test]
@@ -639,14 +748,6 @@ mod tests {
         app.command_buf = "/session 12345".to_string();
         render_all(&app);
         assert!(render(&app, 80, 30).contains("/session 12345"));
-    }
-
-    #[test]
-    fn the_help_overlay_renders_at_every_size() {
-        let mut app = app_with(Puzzle::Clock, 7);
-        app.show_help = true;
-        render_all(&app);
-        assert!(render(&app, 80, 40).contains("switch puzzle"));
     }
 
     #[test]

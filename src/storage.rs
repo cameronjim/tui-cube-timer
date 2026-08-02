@@ -1,6 +1,6 @@
 //! JSON persistence for the save file: where it lives, how it is read and atomically written.
 
-use crate::types::{Puzzle, SaveFile, Session, FIRST_USER_ID, SAVE_VERSION};
+use crate::types::{Puzzle, SaveFile, Session, SAVE_VERSION};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -69,6 +69,9 @@ pub fn load(path: &Path) -> io::Result<SaveFile> {
     if save.version < 3 {
         save = migrate_to_v3(save);
     }
+    if save.version < 4 {
+        save = migrate_to_v4(save);
+    }
     Ok(save)
 }
 
@@ -83,8 +86,37 @@ const V2_DEFAULT_ORDER: [Puzzle; 6] = [
 ];
 /// First user id in a version-2 file: ids 1 through 6 were the reserved defaults.
 const V2_FIRST_USER_ID: u64 = 7;
+/// Id of the 3x3 default, the fallback a version-1 file lands on when its active session is gone.
+const V2_DEFAULT_3X3_ID: u64 = 1;
 /// How far version 3 pushes every version-2 user id up, one slot per new default event.
 const V3_ID_SHIFT: u64 = 5;
+/// The defaults version 3 introduced, on the ids it reserved for them.
+const V3_NEW_DEFAULTS: [(u64, Puzzle); 5] = [
+    (7, Puzzle::Pyraminx),
+    (8, Puzzle::Skewb),
+    (9, Puzzle::Megaminx),
+    (10, Puzzle::Square1),
+    (11, Puzzle::Clock),
+];
+/// First user id in a version-3 file: ids 1 through 11 were the reserved defaults.
+const V3_FIRST_USER_ID: u64 = 12;
+/// How far version 4 pushes every version-3 user id up: one slot, for the one-handed default.
+const V4_ID_SHIFT: u64 = 1;
+/// The default version 4 introduces, on the id it reserves for it.
+const V4_NEW_DEFAULT: (u64, Puzzle) = (12, Puzzle::Oh);
+/// First user id in a version-4 file: ids 1 through 12 are the reserved defaults.
+const V4_FIRST_USER_ID: u64 = 13;
+
+/// A default session on an explicitly given id, for migrations that must not follow `default_session_id`.
+fn frozen_default(id: u64, puzzle: Puzzle) -> Session {
+    Session {
+        id,
+        name: "default".to_string(),
+        puzzle,
+        solves: Vec::new(),
+        created_at: 0,
+    }
+}
 
 /// Migrate a version-1 file: six permanent default sessions, user sessions renumbered from [`V2_FIRST_USER_ID`].
 ///
@@ -128,7 +160,8 @@ fn migrate_to_v2(old: SaveFile) -> SaveFile {
         version: 2,
         next_session_id,
         sessions,
-        active_session_id: active_session_id.unwrap_or_else(|| Puzzle::Cube3.default_session_id()),
+        active_session_id: active_session_id.unwrap_or(V2_DEFAULT_3X3_ID),
+        settings: old.settings,
     }
 }
 
@@ -138,6 +171,11 @@ fn migrate_to_v2(old: SaveFile) -> SaveFile {
 /// [`V2_FIRST_USER_ID`] moves up by [`V3_ID_SHIFT`], keeping its name, puzzle, solves and file
 /// order. The five new defaults are inserted behind the six that already existed, and the active
 /// session follows its renumbering.
+///
+/// Written entirely against `V2_*` and `V3_*` constants rather than `Puzzle::DEFAULT_ORDER` and
+/// `FIRST_USER_ID`, for the reason given above [`migrate_to_v2`]: a migration describes a fixed
+/// historical format, and reading the live constants would make it emit a twelfth default and
+/// renumber from 13 the moment an event is added.
 fn migrate_to_v3(old: SaveFile) -> SaveFile {
     let mut defaults: Vec<Session> = Vec::new();
     let mut users: Vec<Session> = Vec::new();
@@ -155,28 +193,72 @@ fn migrate_to_v3(old: SaveFile) -> SaveFile {
         }
     }
 
-    // The five events version 3 adds, each on the id `types` reserves for it.
+    // The five events version 3 adds, each on the id it reserved for it.
     defaults.extend(
-        Puzzle::DEFAULT_ORDER
+        V3_NEW_DEFAULTS
             .into_iter()
-            .filter(|p| p.default_session_id() >= V2_FIRST_USER_ID)
-            .map(Session::default_for),
+            .map(|(id, puzzle)| frozen_default(id, puzzle)),
     );
 
     let next_session_id = users
         .iter()
         .map(|s| s.id.saturating_add(1))
         .max()
-        .unwrap_or(FIRST_USER_ID)
-        .max(FIRST_USER_ID);
+        .unwrap_or(V3_FIRST_USER_ID)
+        .max(V3_FIRST_USER_ID);
 
     defaults.append(&mut users);
 
     SaveFile {
-        version: SAVE_VERSION,
+        version: 3,
         next_session_id,
         sessions: defaults,
         active_session_id,
+        settings: old.settings,
+    }
+}
+
+/// Migrate a version-3 file: 3x3 One-Handed takes id 12, which belonged to user sessions before.
+///
+/// Every session at or above [`V3_FIRST_USER_ID`] moves up by [`V4_ID_SHIFT`], keeping its name,
+/// puzzle, solves and file order, the one-handed default is appended behind the eleven that
+/// already existed, and the active session follows its renumbering. Settings need no work: they
+/// arrived with this version and `serde(default)` has already filled them in.
+fn migrate_to_v4(old: SaveFile) -> SaveFile {
+    let mut defaults: Vec<Session> = Vec::new();
+    let mut users: Vec<Session> = Vec::new();
+    let mut active_session_id = old.active_session_id;
+
+    for session in old.sessions {
+        if session.id < V3_FIRST_USER_ID {
+            defaults.push(session);
+        } else {
+            let id = session.id.saturating_add(V4_ID_SHIFT);
+            if session.id == old.active_session_id {
+                active_session_id = id;
+            }
+            users.push(Session { id, ..session });
+        }
+    }
+
+    let (oh_id, oh_puzzle) = V4_NEW_DEFAULT;
+    defaults.push(frozen_default(oh_id, oh_puzzle));
+
+    let next_session_id = users
+        .iter()
+        .map(|s| s.id.saturating_add(1))
+        .max()
+        .unwrap_or(V4_FIRST_USER_ID)
+        .max(V4_FIRST_USER_ID);
+
+    defaults.append(&mut users);
+
+    SaveFile {
+        version: 4,
+        next_session_id,
+        sessions: defaults,
+        active_session_id,
+        settings: old.settings,
     }
 }
 
@@ -264,7 +346,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Penalty, Solve};
+    use crate::types::{Penalty, Settings, Solve, FIRST_USER_ID};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A temp path that deletes itself (and any leftover `.tmp` sibling) on drop.
@@ -301,7 +383,7 @@ mod tests {
         }
     }
 
-    /// A current-version file: the eleven defaults, solves on the 3x3 one, plus a user session.
+    /// A current-version file: the twelve defaults, solves on the 3x3 one, plus a user session.
     fn sample() -> SaveFile {
         let mut save = SaveFile::default();
         save.sessions[0].solves = vec![
@@ -334,6 +416,10 @@ mod tests {
         });
         save.next_session_id = FIRST_USER_ID + 1;
         save.active_session_id = FIRST_USER_ID;
+        save.settings = Settings {
+            inspection: true,
+            hide_time: false,
+        };
         save
     }
 
@@ -341,6 +427,7 @@ mod tests {
         assert_eq!(a.version, b.version);
         assert_eq!(a.next_session_id, b.next_session_id);
         assert_eq!(a.active_session_id, b.active_session_id);
+        assert_eq!(a.settings, b.settings);
         assert_eq!(a.sessions.len(), b.sessions.len());
         for (x, y) in a.sessions.iter().zip(b.sessions.iter()) {
             assert_eq!(x.id, y.id);
@@ -528,10 +615,12 @@ mod tests {
                 (9, "default", Puzzle::Megaminx),
                 (10, "default", Puzzle::Square1),
                 (11, "default", Puzzle::Clock),
+                (12, "default", Puzzle::Oh),
             ]
         );
         assert!(save.sessions.iter().all(|s| s.solves.is_empty()));
         assert!(save.sessions.iter().all(|s| s.is_default()));
+        assert_eq!(save.settings, Settings::default());
     }
 
     /// A hand-written version-1 file: the old single `default` session plus one the user made.
@@ -583,6 +672,20 @@ mod tests {
                 .iter()
                 .all(|s| s.name == "default" && s.solves.is_empty()),
             "the other defaults are created empty"
+        );
+        let default_ids: Vec<u64> = loaded.sessions[..Puzzle::DEFAULT_ORDER.len()]
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            default_ids,
+            (1..=Puzzle::DEFAULT_ORDER.len() as u64).collect::<Vec<_>>(),
+            "both later steps append their defaults on the reserved ids"
+        );
+        assert_eq!(
+            loaded.sessions[Puzzle::DEFAULT_ORDER.len() - 1].puzzle,
+            Puzzle::Oh,
+            "the one-handed default is last of the reserved range"
         );
 
         // The user session is renumbered out of the reserved range and keeps everything else.
@@ -638,16 +741,17 @@ mod tests {
 
     #[test]
     fn a_current_version_file_loads_untouched() {
-        let file = TempFile::new("v3-untouched");
+        let file = TempFile::new("v4-untouched");
         fs::write(
             file.path(),
             br#"{
-              "version": 3,
-              "next_session_id": 14,
+              "version": 4,
+              "next_session_id": 15,
               "sessions": [
-                { "id": 13, "name": "evening", "puzzle": "5x5", "solves": [], "created_at": 12 }
+                { "id": 14, "name": "evening", "puzzle": "5x5", "solves": [], "created_at": 12 }
               ],
-              "active_session_id": 13
+              "active_session_id": 14,
+              "settings": { "inspection": true, "hide_time": true }
             }"#,
         )
         .expect("write");
@@ -656,8 +760,86 @@ mod tests {
         assert_eq!(loaded.version, SAVE_VERSION);
         assert_eq!(loaded.sessions.len(), 1, "load must not inject defaults");
         assert_eq!(loaded.sessions[0].name, "evening");
-        assert_eq!(loaded.next_session_id, 14);
-        assert_eq!(loaded.active_session_id, 13);
+        assert_eq!(loaded.next_session_id, 15);
+        assert_eq!(loaded.active_session_id, 14);
+        assert!(loaded.settings.inspection && loaded.settings.hide_time);
+    }
+
+    // ---- settings
+
+    #[test]
+    fn settings_are_defaulted_when_the_file_predates_them() {
+        let file = TempFile::new("settings-absent");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 4,
+              "next_session_id": 13,
+              "sessions": [],
+              "active_session_id": 1
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("a file without settings must still load");
+        assert_eq!(loaded.settings, Settings::default());
+    }
+
+    #[test]
+    fn a_half_written_settings_object_fills_in_the_rest() {
+        let file = TempFile::new("settings-partial");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 4,
+              "next_session_id": 13,
+              "sessions": [],
+              "active_session_id": 1,
+              "settings": { "hide_time": true }
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+        assert!(loaded.settings.hide_time);
+        assert!(!loaded.settings.inspection, "the missing field takes its default");
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip() {
+        let file = TempFile::new("settings-roundtrip");
+        let data = SaveFile {
+            settings: Settings {
+                inspection: true,
+                hide_time: true,
+            },
+            ..Default::default()
+        };
+        save(file.path(), &data).expect("save");
+        let text = fs::read_to_string(file.path()).expect("read");
+        assert!(text.contains("\"settings\""), "settings must be written: {text}");
+        assert_eq!(load(file.path()).expect("load").settings, data.settings);
+    }
+
+    #[test]
+    fn settings_carry_through_the_whole_migration_chain() {
+        let file = TempFile::new("settings-migrated");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 1,
+              "next_session_id": 2,
+              "sessions": [
+                { "id": 1, "name": "default", "puzzle": "3x3", "solves": [], "created_at": 1 }
+              ],
+              "active_session_id": 1,
+              "settings": { "inspection": true, "hide_time": false }
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+        assert!(
+            loaded.settings.inspection,
+            "no migration step may drop a setting"
+        );
     }
 
     /// A hand-written version-2 file: the six old defaults plus one user session on id 7.
@@ -714,9 +896,14 @@ mod tests {
             .iter()
             .all(|s| s.name == "default" && s.solves.is_empty()));
 
+        // Version 4 adds one more behind them.
+        let oh = &loaded.sessions[11];
+        assert_eq!((oh.id, oh.puzzle), (12, Puzzle::Oh));
+        assert!(oh.name == "default" && oh.solves.is_empty());
+
         // The user session moves out of the way of them, keeping everything but its id.
-        let user = &loaded.sessions[11];
-        assert_eq!(user.id, FIRST_USER_ID, "old id 7 moves up by five");
+        let user = &loaded.sessions[12];
+        assert_eq!(user.id, FIRST_USER_ID, "old id 7 moves up by five, then by one more");
         assert_eq!(user.name, "one-handed");
         assert_eq!(user.puzzle, Puzzle::Cube3);
         assert_eq!(user.solves.len(), 1);
@@ -749,7 +936,11 @@ mod tests {
         .expect("write");
         let loaded = load(file.path()).expect("load");
 
-        assert_eq!(loaded.sessions.len(), 6, "only the five new defaults arrive");
+        assert_eq!(
+            loaded.sessions.len(),
+            7,
+            "only the five defaults version 3 adds, plus the one version 4 adds"
+        );
         assert_eq!(loaded.next_session_id, FIRST_USER_ID);
         assert_eq!(loaded.active_session_id, 1);
     }
@@ -781,19 +972,143 @@ mod tests {
             .collect();
         assert_eq!(
             users,
-            vec![(14, "b"), (12, "a"), (35, "c")],
-            "every user id shifts by five and file order survives"
+            vec![(15, "b"), (13, "a"), (36, "c")],
+            "every user id shifts by five then by one, and file order survives"
         );
-        assert_eq!(loaded.active_session_id, 14);
-        assert_eq!(loaded.next_session_id, 36);
+        assert_eq!(loaded.active_session_id, 15);
+        assert_eq!(loaded.next_session_id, 37);
+    }
+
+    /// A hand-written version-3 file: the eleven old defaults plus one user session on id 12.
+    const V3_FILE: &str = r#"{
+      "version": 3,
+      "next_session_id": 13,
+      "sessions": [
+        { "id": 1,  "name": "default", "puzzle": "3x3", "solves": [], "created_at": 11 },
+        { "id": 2,  "name": "default", "puzzle": "2x2", "solves": [], "created_at": 12 },
+        { "id": 3,  "name": "default", "puzzle": "4x4", "solves": [], "created_at": 13 },
+        { "id": 4,  "name": "default", "puzzle": "5x5", "solves": [], "created_at": 14 },
+        { "id": 5,  "name": "default", "puzzle": "6x6", "solves": [], "created_at": 15 },
+        { "id": 6,  "name": "default", "puzzle": "7x7", "solves": [], "created_at": 16 },
+        { "id": 7,  "name": "default", "puzzle": "pyraminx", "solves": [], "created_at": 17 },
+        { "id": 8,  "name": "default", "puzzle": "skewb", "solves": [], "created_at": 18 },
+        { "id": 9,  "name": "default", "puzzle": "megaminx", "solves": [], "created_at": 19 },
+        { "id": 10, "name": "default", "puzzle": "sq1", "solves": [], "created_at": 20 },
+        { "id": 11, "name": "default", "puzzle": "clock", "solves": [], "created_at": 21 },
+        { "id": 12, "name": "one-handed", "puzzle": "3x3", "solves": [
+            { "millis": 22000, "penalty": "None", "scramble": "R U", "timestamp": 1700000002000 }
+          ], "created_at": 22 }
+      ],
+      "active_session_id": 12
+    }"#;
+
+    #[test]
+    fn a_version_three_file_gains_the_one_handed_default_and_renumbers_user_sessions() {
+        let file = TempFile::new("migrate-v3");
+        fs::write(file.path(), V3_FILE).expect("write");
+        let loaded = load(file.path()).expect("a version 3 file must still load");
+
+        assert_eq!(loaded.version, SAVE_VERSION);
+        assert_eq!(loaded.sessions.len(), Puzzle::DEFAULT_ORDER.len() + 1);
+
+        // The eleven old defaults keep their ids, puzzles and creation times.
+        let old_defaults: Vec<(u64, Puzzle, u64)> = loaded.sessions[..11]
+            .iter()
+            .map(|s| (s.id, s.puzzle, s.created_at))
+            .collect();
+        assert_eq!(old_defaults[0], (1, Puzzle::Cube3, 11));
+        assert_eq!(old_defaults[10], (11, Puzzle::Clock, 21));
+
+        // One-handed arrives on id 12, empty, behind the ones already there.
+        let oh = &loaded.sessions[11];
+        assert_eq!((oh.id, oh.puzzle), (12, Puzzle::Oh));
+        assert_eq!(oh.name, "default");
+        assert!(oh.solves.is_empty());
+        assert!(oh.is_default());
+
+        // The user session moves out of its way, keeping everything but its id.
+        let user = &loaded.sessions[12];
+        assert_eq!(user.id, 13, "old id 12 moves up by one");
+        assert_eq!(user.name, "one-handed");
+        assert_eq!(user.puzzle, Puzzle::Cube3);
+        assert_eq!(user.solves.len(), 1);
+        assert_eq!(user.solves[0].millis, 22_000);
+        assert_eq!(user.created_at, 22);
+
+        assert_eq!(
+            loaded.active_session_id, 13,
+            "the active session follows its renumbering"
+        );
+        assert_eq!(loaded.next_session_id, 14);
+        assert_eq!(loaded.settings, Settings::default());
+
+        // Migration is in memory only: the file on disk is still the version 3 text.
+        assert_eq!(fs::read_to_string(file.path()).expect("read back"), V3_FILE);
+    }
+
+    #[test]
+    fn a_version_three_file_without_user_sessions_lands_on_the_first_user_id() {
+        let file = TempFile::new("migrate-v3-bare");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 3,
+              "next_session_id": 12,
+              "sessions": [
+                { "id": 1, "name": "default", "puzzle": "3x3", "solves": [], "created_at": 1 }
+              ],
+              "active_session_id": 1
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+
+        assert_eq!(loaded.sessions.len(), 2, "only the one-handed default arrives");
+        assert_eq!(loaded.sessions[1].puzzle, Puzzle::Oh);
+        assert_eq!(loaded.next_session_id, FIRST_USER_ID);
+        assert_eq!(loaded.active_session_id, 1);
+    }
+
+    #[test]
+    fn version_four_renumbering_keeps_every_user_session_in_order() {
+        let file = TempFile::new("migrate-v3-many");
+        fs::write(
+            file.path(),
+            br#"{
+              "version": 3,
+              "next_session_id": 41,
+              "sessions": [
+                { "id": 14, "name": "b", "puzzle": "2x2", "solves": [], "created_at": 2 },
+                { "id": 12, "name": "a", "puzzle": "3x3", "solves": [], "created_at": 1 },
+                { "id": 40, "name": "c", "puzzle": "4x4", "solves": [], "created_at": 3 }
+              ],
+              "active_session_id": 40
+            }"#,
+        )
+        .expect("write");
+        let loaded = load(file.path()).expect("load");
+
+        let users: Vec<(u64, &str)> = loaded
+            .sessions
+            .iter()
+            .filter(|s| s.id >= FIRST_USER_ID)
+            .map(|s| (s.id, s.name.as_str()))
+            .collect();
+        assert_eq!(
+            users,
+            vec![(15, "b"), (13, "a"), (41, "c")],
+            "every user id shifts by one and file order survives"
+        );
+        assert_eq!(loaded.active_session_id, 41);
+        assert_eq!(loaded.next_session_id, 42);
     }
 
     #[test]
     fn a_newer_version_file_is_an_error() {
-        let file = TempFile::new("v4");
+        let file = TempFile::new("v5");
         let text = r#"{
-          "version": 4,
-          "next_session_id": 12,
+          "version": 5,
+          "next_session_id": 13,
           "sessions": [],
           "active_session_id": 1
         }"#;

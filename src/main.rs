@@ -7,7 +7,7 @@ mod storage;
 mod types;
 mod ui;
 
-use std::io;
+use std::io::{self, Write};
 use std::time::Duration;
 
 use ratatui::crossterm::event::{
@@ -22,6 +22,8 @@ use crate::app::App;
 
 /// Poll interval for the event loop.
 const TICK: Duration = Duration::from_millis(15);
+/// Terminal bell, the audible half of the 8 and 12 second inspection calls.
+const BEL: &[u8] = b"\x07";
 
 fn main() {
     let path = storage::data_file_path();
@@ -75,6 +77,11 @@ fn main() {
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
         app.on_tick();
+        // A judge call is audible only; BEL moves no cursor, so the frame is unaffected.
+        if app.take_bell() {
+            let mut out = io::stdout();
+            let _ = out.write_all(BEL).and_then(|()| out.flush());
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if event::poll(TICK)? {
