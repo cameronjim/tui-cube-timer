@@ -19,7 +19,7 @@ outgrew one file. `scramble/mod.rs` dispatches on `Puzzle` to one generator per 
 family; `ui/mod.rs` draws the frame, `ui/timer.rs` draws the big countdown and owns the
 block font, `ui/overlay.rs` draws the popups on top and `ui/layout.rs` holds the pure
 geometry they all draw into; `app/mod.rs` runs the state machine, `app/commands.rs` runs
-command mode, `app/selection.rs` owns the times cursor and the two list overlays,
+command mode, `app/selection.rs` owns the times cursor and all four overlays,
 `app/progress.rs` owns the trend and the personal-best celebration, and `app/repair.rs`
 repairs a save file. A directory is still one module for the purposes of this document: the
 boundary rules below apply to `ui/` as a whole, not to each file inside it, and the same
@@ -119,7 +119,8 @@ and touches neither `Frame` nor `App`, which turned the degradation rules from s
 checked by eye into ordinary unit tests. `app/` divides by question asked: `repair.rs`
 answers "is this save file internally consistent" as free functions over `&mut SaveFile`,
 `commands.rs` owns command mode behind the single `on_command_key` entry point,
-`selection.rs` owns which solve or session you are pointing at, which the timer never asks,
+`selection.rs` owns which solve or session you are pointing at and which overlay is up,
+neither of which the timer asks,
 `progress.rs` owns how the session is going, which is the trend and the personal-best
 celebration, and `mod.rs` keeps the state machine. Every one of those splits made the code
 more testable, which is the sign you cut in the right place.
@@ -138,13 +139,13 @@ child keeps everything behind it. `on_key_idle` hands its cursor keys to
 has to travel back up to the parent is a sign the cut was made one function too deep.
 
 No file in `src/` is over the line now, but one is close enough to name. `app/mod.rs` is at
-497 non-test lines after the trend and the personal-best banner moved out to
-`app/progress.rs`, which is under 500 with nothing to spare; the next cut there is the
-inspection cluster, meaning the five `INSPECTION_*` constants with `start_inspection`,
-`cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind them. Below it are
-`ui/mod.rs` at 465, `app/commands.rs` at 431, `cstimer.rs` at 372 and `storage.rs` at 345,
-none of which has a seam worth cutting yet. Treat growth past roughly 500 in any of them as
-the prompt to look again.
+493 non-test lines after the trend, the personal-best banner and the overlay toggles moved
+out to `app/progress.rs` and `app/selection.rs`, which is under 500 with nothing to spare;
+the next cut there is the inspection cluster, meaning the five `INSPECTION_*` constants with
+`start_inspection`, `cancel_inspection`, `refresh_inspection` and `on_key_inspecting` behind
+them. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391, `ui/mod.rs` at 380,
+`cstimer.rs` at 372 and `storage.rs` at 345, none of which has a seam worth cutting yet.
+Treat growth past roughly 500 in any of them as the prompt to look again.
 
 ## Comments
 

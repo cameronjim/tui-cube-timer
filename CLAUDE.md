@@ -45,13 +45,13 @@ Three of those are directories, each split along its own internal seam:
 |---|---|
 | `app/mod.rs` | Timer state machine, key handling, tick, the derived fields the UI reads |
 | `app/commands.rs` | Command mode: the `/command` parser and every `cmd_*` handler |
-| `app/selection.rs` | Selection state: the times cursor, the solve-detail overlay, the sessions picker |
+| `app/selection.rs` | Overlay state: the times cursor, the solve detail, the sessions picker, the help and trend toggles |
 | `app/progress.rs` | How the session is going: the trend window and the personal-best celebration |
 | `app/repair.rs` | Save-file structural repair: `sanitize` and the id bookkeeping under it |
 | `app/testkit.rs` | Test scaffolding shared by the five, `#[cfg(test)]` only |
 | `ui/mod.rs` | `draw`, the header, the stats strip, the times list and the status line |
 | `ui/timer.rs` | The big countdown: `timer_view`, `draw_timer` and the block font |
-| `ui/overlay.rs` | The three popups: help, the session picker, and one solve in full |
+| `ui/overlay.rs` | The four popups: help, the session picker, the trend graph, and one solve in full |
 | `ui/layout.rs` | Pure geometry: panel heights, word wrap, popup placement. No `Frame`, no `App` |
 | `scramble/mod.rs` | Dispatch on `Puzzle`, nothing else |
 | `scramble/{cube,pyraminx,skewb,megaminx,square1,clock}.rs` | One puzzle family each |
@@ -65,14 +65,15 @@ of `app`: `crate::app::App` keeps every path it had before the directory split, 
 `main.rs` and `ui` are unaware there is more than one file behind it.
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
-rather than appending. Nothing in `src/` is over the line, but `app/mod.rs` sits at 497
+rather than appending. Nothing in `src/` is over the line, but `app/mod.rs` sits at 493
 non-test lines with nothing to spare, so the next thing added to the state machine needs a
 cut first, not after. **The seam waiting there is the inspection cluster**: the five
 `INSPECTION_*` constants with `start_inspection`, `cancel_inspection`, `refresh_inspection`
 and `on_key_inspecting` behind them, which is the one part of the timer that has its own
-vocabulary. Below it are `ui/mod.rs` at 465, `app/commands.rs` at 431, `cstimer.rs` at 372
-and `storage.rs` at 345, none of which has an obvious seam left, so treat growth past
-roughly 500 in any of them as the prompt to look for one. `app/progress.rs` is the most
+vocabulary. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391,
+`ui/mod.rs` at 380, `cstimer.rs` at 372 and `storage.rs` at 345, none of which has an
+obvious seam left, so treat growth past roughly 500 in any of them as the prompt to look
+for one. `app/progress.rs` is the most
 recent cut and it shows the shape to aim for, as `app/selection.rs` and `ui/timer.rs` did
 before it: the parent keeps one entry point per cluster (`note_pb`, `expire_pb_banner`,
 `on_key_times`, `draw_timer`) and the child keeps every constant and helper behind it.

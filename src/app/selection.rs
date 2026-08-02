@@ -1,7 +1,9 @@
-//! Selection state: the times-list cursor, the solve-detail overlay and the sessions picker.
+//! Selection state: the times-list cursor and the four overlays, modal and not.
 //!
 //! None of this is timer state, so it lives beside the state machine in [`super`] rather than
 //! inside it. Every entry point here is reached from a key the state machine did not claim.
+//! The mutual exclusion between the three overlays that can be opened outright is enforced
+//! here, where the state changes, rather than in the renderer.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
@@ -13,6 +15,37 @@ const TIMES_PAGE: usize = 10;
 const SESSIONS_PAGE: usize = 10;
 
 impl App {
+    // ------------------------------------------------- the non-modal overlays
+
+    /// Toggle the help. The overlays are alternatives, so opening one closes the others.
+    pub(super) fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+        if self.show_help {
+            self.show_trend = false;
+            self.sessions_overlay = None;
+        }
+    }
+
+    /// Toggle the trend graph, on the same terms as the help it displaces.
+    pub(super) fn toggle_trend(&mut self) {
+        self.show_trend = !self.show_trend;
+        if self.show_trend {
+            self.show_help = false;
+            self.sessions_overlay = None;
+        }
+    }
+
+    /// Close whichever non-modal overlay is up, reporting whether there was one.
+    ///
+    /// Esc uses the answer to decide whether it has anything left to do: with no popup open
+    /// it goes on to clear the status line instead.
+    pub(super) fn close_popups(&mut self) -> bool {
+        let was_open = self.show_help || self.show_trend;
+        self.show_help = false;
+        self.show_trend = false;
+        was_open
+    }
+
     // --------------------------------------------------------- the times list
 
     /// The Idle-mode keys that belong to the times list rather than to the timer.
@@ -80,6 +113,7 @@ impl App {
     pub(super) fn open_sessions_overlay(&mut self) {
         self.sessions_overlay = Some(self.active_index());
         self.show_help = false;
+        self.show_trend = false;
     }
 
     /// Drive the modal sessions list: move the cursor, switch to a session, or close.
@@ -325,6 +359,15 @@ mod tests {
         assert_eq!(app.sessions_overlay, None);
         app.on_key(press(KeyCode::Char('?')));
         assert!(!app.show_help, "'?' still closes the help");
+    }
+
+    #[test]
+    fn the_trend_graph_and_the_sessions_overlay_are_never_open_at_once() {
+        let (mut app, _g) = test_app("overlay-trend-exclusive");
+        app.show_trend = true;
+        app.open_sessions_overlay();
+        assert_eq!(app.sessions_overlay, Some(0), "the listing opens");
+        assert!(!app.show_trend, "and the graph closes behind it");
     }
 
     // ------------------------------------------------------- the times cursor

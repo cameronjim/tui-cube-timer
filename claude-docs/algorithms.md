@@ -271,21 +271,37 @@ ever mixes events.
 
 `app::progress::trend_of` is the one derived series that is not a statistic. It takes the
 last 50 solves of the active session and keeps their `effective_millis()`, so what the
-sparkline draws is the time each solve actually cost: a `+2` plots two seconds higher than
-the stopwatch said, and a DNF, having no effective time, is not plotted at all. Nothing is
-substituted for it, so the bars are shorter than the window whenever a DNF is in range and
-a run of them simply leaves fewer bars. The series is oldest first and unsmoothed, and the
-bar height is a time rather than a score, which makes a dip a fast solve.
+`/trend` graph draws is the time each solve actually cost: a `+2` plots two seconds higher
+than the stopwatch said, and a DNF, having no effective time, is not plotted at all.
+Nothing is substituted for it, so the series is shorter than the window whenever a DNF is
+in range and a run of them simply leaves fewer points. The series is oldest first and
+unsmoothed, and y is a time rather than a score, which makes a dip a fast solve.
 
-Height is normalized to the window and not to zero. `ui::trend_bars` takes the minimum and
-the maximum of the window it is handed and maps each value onto the `TREND_LEVELS` heights
-the bars have, as `1 + (v - min) * (TREND_LEVELS - 1) / (max - min)`, so the fastest solve
-of the fifty is level 1 and the slowest is level `TREND_LEVELS`. Solve times cluster in a
-band far away from zero, and scaling from zero draws that band as a row of identical full
-bars saying nothing; scaling to the window's own range spends every level on the spread
-that is actually there. The floor of 1 is what keeps the line unbroken, since level 0 is
-a blank column. A window whose maximum equals its minimum has no range to spread over and
-is drawn flat at `TREND_FLAT`, half way up, rather than as a row of records.
+`ui::overlay::trend_plot` turns that series into the points and the two axis bounds the
+chart is given. x is a solve's index in the window, and the whole window is plotted
+whatever the popup's width, because a line stays a line when two solves land in the same
+column and dropping the oldest to avoid that would make the x axis lie.
+
+The y axis spans the window and not zero. Its floor is the window minimum, and its ceiling
+is `trend_top`, the window's 95th percentile by nearest rank rather than its maximum:
+`rank = ceil(0.95 n)`, held below `n` once `n >= TREND_TRIM_MIN` (5). Values above the
+ceiling are clamped onto it before they are handed to the chart. Two separate problems are
+being solved there. Solve times cluster in a band far away from zero, so scaling from zero
+draws every session as one flat line near the top of the graph, and scaling to the window's
+own range spends the whole height on the spread that is actually there. Scaling to the
+window's *maximum* then re-introduces the same failure whenever one solve is wrecked: a
+single 60 second solve among twelve second ones crushes the other forty nine onto the
+bottom row. Pinning the ceiling below the slowest solve costs exactly one distinction, the
+one between the slowest and the next slowest, and buys the whole of the range under it.
+Plain nearest rank does not do that on its own, because `ceil(0.95 n)` is `n` for every
+`n` under twenty, which is the length at which one bad solve does the most damage, hence
+the second clamp. Under five solves there is nothing to call an outlier and the ceiling is
+the maximum.
+
+A window whose ceiling equals its minimum has no range to spread over. It is drawn against
+`[min - TREND_FLAT_PAD, min + TREND_FLAT_PAD]`, which puts the flat line half way up
+instead of dividing by zero, and a single solve is duplicated at x = 1 so it draws as the
+flat line it is rather than as a dot in the corner.
 
 ---
 
