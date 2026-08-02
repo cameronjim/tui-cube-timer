@@ -61,7 +61,7 @@ is what makes the degradation rules testable as ordinary functions rather than b
 
 | File | Covers | Non-test lines |
 | --- | --- | --- |
-| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 430 |
+| `mod.rs` | `draw`, the palette, `panel`, the header, stats, the trend sparkline, times list and status line | 450 |
 | `timer.rs` | `timer_view`, `draw_timer`, the personal-best banner, `GLYPH_H` and the 5-row block font | 207 |
 | `overlay.rs` | `draw_help`, `draw_sessions`, `draw_detail` | 240 |
 | `layout.rs` | Panel heights, word wrap, `list_window`, `fit_count`, `stats_height`, popup placement | 268 |
@@ -81,7 +81,7 @@ they had when `app` was one file.
 | File | Covers | Non-test lines |
 | --- | --- | --- |
 | `mod.rs` | `App`, `TimerState`, `InputMode`, the timer key handling, tick, `refresh_derived` | 497 |
-| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 381 |
+| `commands.rs` | `on_command_key`, `execute_command`, every `cmd_*` handler | 431 |
 | `selection.rs` | `on_key_times`, `open_solve_detail`, `recall_scramble`, `open_sessions_overlay`, `on_key_sessions` | 116 |
 | `repair.rs` | `sanitize`, `free_next_id`, `take_id`, `dedupe_ids`, `evict_misfiled_defaults` | 95 |
 | `progress.rs` | `trend_of`, `pb_banner_text`, `note_pb`, `clear_pb_banner`, `expire_pb_banner` | 76 |
@@ -556,11 +556,12 @@ produces `unknown command: <verb>` in the status line.
 | `/session <id>` | Activate a session by id, adopting its puzzle |
 | `/rename <name>` | Rename the active session, refused on a default |
 | `/delsession [id]` | Delete a session and its solves, the active one by default |
+| `/delsession <from>-<to>` | Delete every user session in that inclusive id range |
 | `/del [n]`, `/delete [n]` | Remove solve `n` as the times list numbers it, the most recent by default |
 | `/dnf`, `/+2`, `/ok` | Set the most recent solve's penalty |
 | `/inspect` | Toggle 15-second inspection, persisted |
 | `/hidetime` | Toggle masking the running time, persisted |
-| `/export [path]` | Write every session out as a csTimer export, `cubetimer-cstimer-export.json` by default |
+| `/export [path]` | Write every session out as a csTimer export, `cstimer_YYYYMMDD_HHMMSS.txt` by default |
 | `/import <path>` | Adopt a csTimer export, every session in it as a new one |
 | `/help` | Toggle the help overlay |
 | `/quit`, `/q` | Quit |
@@ -578,8 +579,10 @@ of the serialised file, so the next `storage::load` hands the preference straigh
 
 `/export` and `/import` are the two commands that touch a file other than the save file,
 and they are the only callers of `cstimer`. `cmd_export` serialises `self.save` and writes
-the result with `fs::write`, defaulting to `EXPORT_FILE`, `cubetimer-cstimer-export.json`,
-in the working directory; `shown_path` resolves a relative path against the current
+the result with `fs::write`, defaulting to `cstimer::default_file_name(storage::now_millis())`
+in the working directory, which is csTimer's own `cstimer_YYYYMMDD_HHMMSS.txt` naming in UTC.
+The `.txt` matters: csTimer's import file picker accepts `text/*` and hides a `.json` file.
+`shown_path` resolves a relative path against the current
 directory so the status line names somewhere the user can actually go and look. It changes
 no session, no solve and no setting, and it does not call `save_now`, so an export is safe
 at any moment. `cmd_import` reads
@@ -664,6 +667,17 @@ Either way the scramble is regenerated for the new puzzle and the file is saved.
 active session when there is none, refuses defaults and unknown ids with a status message,
 and when the session being deleted is the active one it activates that session's puzzle
 default, which is guaranteed to exist by the invariant above.
+
+An argument holding a `-` after its first character is a range instead, and
+`cmd_delete_session_range` handles it: one `retain` over `sessions`, one fallback check, one
+`refresh_derived` and one save, however many sessions go. Nothing in the range has to exist
+and nothing in it has to be deletable, so rather than reporting a default and a free id one
+by one it counts them, as the span of the range less the number actually removed, and says
+`deleted 4 sessions (2 skipped)`. That arithmetic is also what keeps `/delsession 13-99999`
+from walking a range of ninety thousand ids. A reversed range is a usage error, and a
+bound that is not a number is the usage line, but a leading `-` still parses as a malformed
+single id so `/delsession -1` answers what it always did. The fallback puzzle is read before
+the `retain`, because the session holding it may be one of the ones going.
 
 `/new` names an unnamed session `session N`, where N is one more than the number of
 existing sessions for that puzzle, so the counter is per-puzzle rather than global. Any
@@ -876,11 +890,11 @@ panic and without a blank screen:
   0 and it is not drawn at all.
 - **Times column** is 26 columns wide at width 60 or more, 20 columns at 44 or more, and
   disappears below that; the timer then takes the whole body.
-- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 7
-  rows once it has at least 14, the extra 2 being the trend sparkline. `stats_height` is
+- **Stats strip** is 5 rows when the left column has at least 12 rows, otherwise 0, and 6
+  rows once it has at least 13, the extra one being the trend sparkline. `stats_height` is
   the whole of that decision and `trend_rows` is the conditional half of it: the strip
   appears at `STATS_H` (5) once `STATS_H + TIMER_MIN_H` fits, and the sparkline adds
-  `TREND_H` (2) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
+  `TREND_H` (1) on top only once `STATS_H + TREND_H + TIMER_MIN_H` does. Both thresholds
   are written against `TIMER_MIN_H`, so the bars can never be the reason the block font is
   lost, and every terminal too short for them renders exactly what it did before the trend
   existed. An empty trend claims no rows at all.
@@ -906,12 +920,22 @@ panic and without a blank screen:
   `best single 9.87` is wide enough that the paragraph clips it, which is the intended
   degradation: a clipped number still says more than a blank row.
 
-  `draw_trend` takes the rows below and spends the same `STAT_PREFIX_W` plus a space on a
+  `draw_trend` takes the row below and spends the same `STAT_PREFIX_W` plus a space on a
   dim `trend` label, so the bars begin in the column the three rows put their values in.
   What it plots is `App::trend`, tail-sliced to the width it was given, because a panel too
   narrow for fifty bars should drop the oldest solves rather than the ones just done. The
   bars are times, so a dip is a fast solve. A panel with no room for anything past the
   label draws neither.
+
+  Two details keep that row readable, and both are about how ratatui draws a bar. It splits
+  each bar across every row of the area it is handed, so a two-row sparkline fills its
+  bottom row and scatters fragments through the top one wherever a bar passes half height,
+  which is why `TREND_H` is 1 and why `draw_trend` clamps the rect it renders into rather
+  than trusting the block to be the height it asked for. It also scales each bar against
+  the tallest value in the window and rounds down, so in a single row a solve under an
+  eighth of the slowest one lands on the empty symbol and puts a hole in the middle of the
+  line; `trend_bars` lifts those to the floor of one eighth first, and everything above the
+  floor stays proportional to the time it took.
 - **Big digits** need 5 rows (`GLYPH_H`, which lives in `ui/timer.rs` and which
   `layout::TIMER_MIN_H` is derived from) and enough width for the rendered glyph string.
   When either is missing, `draw_timer` falls back to the same text as an ordinary bold

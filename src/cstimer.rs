@@ -3,19 +3,44 @@
 //! Pure conversion. Nothing here opens a file; `app::commands` does the IO and the id
 //! bookkeeping.
 //!
-//! The shape is csTimer's own, read off its source. The top level is an object of `session1`
-//! through `sessionN` solve arrays beside a `properties` object. One solve is
-//! `[[penalty, millis], scramble, comment, timestamp]`, where the penalty is 0 for a clean
-//! solve, 2000 for a +2 and -1 for a DNF, `millis` is the raw time with no penalty folded into
-//! it, and the timestamp is Unix seconds. Per-session names and scramble types live under
-//! `properties.sessionData`, which csTimer stores as a JSON-encoded string rather than as an
-//! object, and `properties.sessionN` is how many sessions its importer will look for.
+//! The shape is csTimer's own, read off its source and off a file csTimer wrote. The top level
+//! is an object of `session1` through `sessionN` solve arrays beside a `properties` object. One
+//! solve is `[[penalty, millis], scramble, comment, timestamp]`, where the penalty is 0 for a
+//! clean solve, 2000 for a +2 and -1 for a DNF, `millis` is the raw time with no penalty folded
+//! into it, the comment is present and empty rather than absent, and the timestamp is Unix
+//! seconds. Per-session names and scramble types live under `properties.sessionData`, which
+//! csTimer stores as a JSON-encoded string rather than as an object, and `properties.sessionN`
+//! is how many sessions its importer will look for: it reads `session1` through `sessionN` and
+//! nothing beyond.
+//!
+//! csTimer's import is a file picker that accepts `text/*`, which is why [`default_file_name`]
+//! ends in `.txt` and not `.json`: the operating system calls a `.json` file `application/json`
+//! and the picker hides it.
 
 use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
 use crate::types::{Penalty, Puzzle, SaveFile, Session, Solve};
+
+/// csTimer displays and averages times truncated to hundredths, and its cached session mean
+/// is computed on the truncated values.
+const ROUND_MILLIS: u64 = 10;
+
+/// The name csTimer gives its own exports: `cstimer_YYYYMMDD_HHMMSS.txt`, here in UTC.
+///
+/// The date arithmetic is [`crate::types::format_timestamp`]'s, reduced to its digits, with the
+/// seconds it does not print taken off the clock directly. A clock far enough off to print a
+/// year outside four digits falls back to a fixed name rather than a malformed one.
+pub fn default_file_name(now_millis: u64) -> String {
+    let stamp = crate::types::format_timestamp(now_millis);
+    let digits: String = stamp.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() != 12 {
+        return "cstimer_export.txt".to_string();
+    }
+    let second = (now_millis / 1_000) % 60;
+    format!("cstimer_{}_{}{:02}.txt", &digits[..8], &digits[8..], second)
+}
 
 /// A parsed csTimer export.
 #[derive(Debug)]
@@ -36,14 +61,19 @@ pub fn export(save: &SaveFile) -> String {
         let index = i + 1;
         let solves: Vec<Value> = session.solves.iter().map(export_solve).collect();
         root.insert(format!("session{}", index), Value::Array(solves));
-        session_data.insert(
-            index.to_string(),
-            json!({
-                "name": export_name(session),
-                "opt": { "scrType": scramble_type(session.puzzle) },
-                "rank": index,
-            }),
+
+        let mut meta = Map::new();
+        meta.insert("name".to_string(), json!(export_name(session)));
+        meta.insert(
+            "opt".to_string(),
+            json!({ "scrType": scramble_type(session.puzzle) }),
         );
+        meta.insert("rank".to_string(), json!(index));
+        if let Some((stat, date)) = session_summary(session) {
+            meta.insert("stat".to_string(), stat);
+            meta.insert("date".to_string(), date);
+        }
+        session_data.insert(index.to_string(), Value::Object(meta));
     }
 
     let active = save
@@ -51,6 +81,11 @@ pub fn export(save: &SaveFile) -> String {
         .iter()
         .position(|s| s.id == save.active_session_id)
         .map_or(1, |i| i + 1);
+    // `properties` is csTimer's settings object, and importing one replaces the lot. These
+    // three are the whole of what an import needs; everything else csTimer keeps in there is
+    // a preference of its own, so it is left out rather than invented, and csTimer falls back
+    // to its defaults for each. A file csTimer wrote omits `sessionN` and `session` whenever
+    // they already hold their defaults, which is why a real export can carry neither.
     root.insert(
         "properties".to_string(),
         json!({
@@ -164,6 +199,34 @@ fn export_name(session: &Session) -> String {
     } else {
         session.name.clone()
     }
+}
+
+/// The `stat` and `date` csTimer caches per session, or None for a session with no solves.
+///
+/// `stat` is `[solves, DNFs, mean]` and `date` is the first and last solve in Unix seconds.
+/// csTimer writes neither for a session it has never opened and recomputes both the moment it
+/// does, so they are not load bearing, but its session manager lists a session by them before
+/// anything opens it.
+fn session_summary(session: &Session) -> Option<(Value, Value)> {
+    let first = session.solves.first()?;
+    let last = session.solves.last()?;
+    let counted: Vec<u64> = session
+        .solves
+        .iter()
+        .filter_map(Solve::effective_millis)
+        .map(|ms| ms - ms % ROUND_MILLIS)
+        .collect();
+    let dnfs = session.solves.len() - counted.len();
+    // csTimer's own answer when every solve is a DNF and there is nothing to average.
+    let mean = if counted.is_empty() {
+        -1.0
+    } else {
+        counted.iter().sum::<u64>() as f64 / counted.len() as f64
+    };
+    Some((
+        json!([session.solves.len(), dnfs, mean]),
+        json!([first.timestamp / 1_000, last.timestamp / 1_000]),
+    ))
 }
 
 fn export_solve(solve: &Solve) -> Value {
@@ -395,6 +458,104 @@ mod tests {
     }
 
     #[test]
+    fn the_top_level_is_a_solve_list_per_session_and_one_properties_object() {
+        // The shape of a file csTimer wrote: session1..sessionN and properties, nothing else.
+        let root = parse(&export(&save_with(vec![solve(
+            12_340,
+            Penalty::None,
+            "R",
+            1_700_000_000_000,
+        )])));
+        let object = root.as_object().expect("the top level is an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected: Vec<String> = (1..=13).map(|i| format!("session{}", i)).collect();
+        expected.push("properties".to_string());
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+
+        let properties = root["properties"]
+            .as_object()
+            .expect("properties is an object");
+        let mut property_keys: Vec<&str> = properties.keys().map(String::as_str).collect();
+        property_keys.sort_unstable();
+        assert_eq!(
+            property_keys,
+            vec!["session", "sessionData", "sessionN"],
+            "csTimer's importer reads sessionN and the session data; the rest of what it \
+             keeps in properties is its own preferences"
+        );
+        assert!(
+            root["properties"]["sessionData"].is_string(),
+            "sessionData is JSON inside a string, as csTimer stores it"
+        );
+    }
+
+    #[test]
+    fn a_session_with_solves_carries_the_summary_cstimer_caches() {
+        // csTimer's own file writes stat as [solves, DNFs, mean] and date as first and last
+        // solve in seconds, with the mean over times truncated to hundredths.
+        let save = save_with(vec![
+            solve(12_715, Penalty::None, "R", 1_700_000_000_000),
+            solve(12_117, Penalty::Plus2, "U", 1_700_000_060_000),
+            solve(9_999, Penalty::Dnf, "F", 1_700_000_120_000),
+        ]);
+        let data = session_data(&parse(&export(&save)));
+        // 12710 and 14110 after the +2 and the truncation, over the two solves that count.
+        assert_eq!(data["1"]["stat"], json!([3, 1, 13_410.0]));
+        assert_eq!(data["1"]["date"], json!([1_700_000_000, 1_700_000_120]));
+    }
+
+    #[test]
+    fn a_session_of_nothing_but_dnfs_has_no_mean_to_report() {
+        let save = save_with(vec![
+            solve(9_990, Penalty::Dnf, "R", 1_700_000_000_000),
+            solve(8_880, Penalty::Dnf, "U", 1_700_000_060_000),
+        ]);
+        let data = session_data(&parse(&export(&save)));
+        assert_eq!(
+            data["1"]["stat"],
+            json!([2, 2, -1.0]),
+            "-1 is csTimer's own answer for an average of nothing"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_carries_no_summary_at_all() {
+        let data = session_data(&parse(&export(&SaveFile::default())));
+        let entry = data["1"].as_object().expect("an entry per session");
+        let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["name", "opt", "rank"],
+            "csTimer writes stat and date only for a session it has opened"
+        );
+    }
+
+    #[test]
+    fn the_default_export_name_is_the_one_cstimer_gives_its_own() {
+        // 2026-08-02 14:15:34 UTC, the shape csTimer's import file picker accepts.
+        assert_eq!(
+            default_file_name(1_785_680_134_000),
+            "cstimer_20260802_141534.txt"
+        );
+        assert_eq!(default_file_name(0), "cstimer_19700101_000000.txt");
+        assert_eq!(
+            default_file_name(u64::MAX),
+            "cstimer_export.txt",
+            "a clock outside four-digit years names the file rather than mangling it"
+        );
+        for millis in [0, 1, 1_785_680_134_000, u64::MAX] {
+            let name = default_file_name(millis);
+            assert!(
+                name.ends_with(".txt"),
+                "csTimer's picker accepts text/* and hides a .json file: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn export_names_the_defaults_after_their_event_and_leaves_user_names_alone() {
         let root = parse(&export(&save_with(Vec::new())));
         let data = session_data(&root);
@@ -469,7 +630,15 @@ mod tests {
     /// A file in the shape csTimer itself writes, down to the string-encoded `sessionData`.
     fn fixture() -> String {
         let session_data = json!({
-            "1": { "name": "main", "opt": { "scrType": "333" }, "rank": 1 },
+            // The cached summary csTimer writes beside a session it has opened. An import
+            // recomputes it from the solves, so nothing here reads it.
+            "1": {
+                "name": "main",
+                "opt": { "scrType": "333" },
+                "rank": 1,
+                "stat": [3, 1, 13_410.0],
+                "date": [1_700_000_000, 1_700_000_120]
+            },
             "2": { "name": "one handed", "opt": { "scrType": "333oh" }, "rank": 2 },
             "3": { "name": "blind", "opt": { "scrType": "333ni" }, "rank": 3 },
             "4": { "name": 4, "opt": {}, "rank": 4 }
@@ -667,3 +836,4 @@ mod tests {
         }
     }
 }
+

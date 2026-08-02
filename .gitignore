@@ -4,3 +4,7 @@
 # Save file, written here when no platform data directory is available
 /sessions.json
 /sessions.json.tmp
+
+# csTimer exports, written here by `/export` with no path, and the old default name
+/cstimer_*.txt
+/cubetimer-cstimer-export.json
