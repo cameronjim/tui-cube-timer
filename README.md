@@ -11,15 +11,56 @@ keyboard or reach for a mouse.
 
 ## Getting started
 
-Build it once:
+Cubetimer ships as source code, so you build it once on your machine and end up
+with a single self-contained `.exe`. Here is the whole journey from a bare
+computer to a running timer.
+
+### What you need first
+
+Two tools, both free:
+
+1. **The Rust toolchain**, installed through [rustup](https://rustup.rs). This
+   gives you `cargo`, Rust's build tool, which handles everything else below.
+   On Windows the installer offers two flavours: the default MSVC flavour asks
+   to install Microsoft's Visual Studio Build Tools alongside it, and the GNU
+   flavour needs no Visual Studio but wants MinGW binutils on your PATH for
+   some dependencies. If you have no opinion, take the default and let it
+   install what it asks for.
+2. **Git**, to fetch the code, though the green Code button on GitHub offers a
+   ZIP download that works just as well.
+
+### Build and run
 
 ```
+git clone https://github.com/cameronjim/tui-cube-timer.git
+cd tui-cube-timer
 cargo build --release
 ```
 
-Then run `target\release\cubetimer.exe`, or drop that file somewhere on your
-PATH and just type `cubetimer`. During development, `cargo run --release` does
-both steps at once.
+The first build takes a few minutes: cargo downloads the libraries Cubetimer
+uses and compiles everything, once. Builds after that take seconds. The
+finished program lands at `target\release\cubetimer.exe`; run it from there,
+or drop that one file anywhere on your PATH and just type `cubetimer`. During
+development, `cargo run --release` builds and runs in one step.
+
+There is nothing else to install, ever. The libraries are declared in
+`Cargo.toml`, pinned to exact versions in `Cargo.lock`, and fetched by cargo on
+that first build: [ratatui](https://ratatui.rs) draws the interface, serde and
+serde_json read and write the save file, rand feeds the scramblers, and
+directories finds your data folder. The compiled `.exe` carries all of them
+inside it, so it needs no runtime, no framework and no installer on any machine
+it is copied to.
+
+### What it is built with
+
+Cubetimer is one Rust binary running one loop: wait up to 15 milliseconds for a
+keypress, update the state, redraw the whole screen from that state. Eight
+modules divide the work, each with a single job: `types` holds the shared
+vocabulary, `app` owns the state machine and every `/command`, `ui` turns state
+into a frame, `scramble` generates WCA notation one puzzle family per file,
+`stats` does the WCA math, `storage` reads and writes the save file atomically,
+and `cstimer` translates to and from csTimer's format. The full tour lives in
+`claude-docs/architecture.md`.
 
 Cubetimer is built for Windows first, because the hold-and-release space bar
 flow needs a terminal that reports key releases and the Windows console does
@@ -396,9 +437,8 @@ you set the pins yourself.
 
 ## Under the hood
 
-Cubetimer is written in Rust and drawn with [ratatui](https://ratatui.rs). It
-has no runtime dependencies and no configuration file. Build it with
-`cargo build --release` and the binary lands at `target\release\cubetimer.exe`.
-
-Architecture notes and design documents live in `claude-docs/`, and if you are
-planning to send a change, the ground rules are in `CLAUDE.md`.
+Everything about how Cubetimer is put together, the event loop, the module
+boundaries, the save-file versioning and the scramble research, lives in
+`claude-docs/`. If you are planning to send a change, the ground rules are in
+`CLAUDE.md`: every change ships with its tests, and `cargo test` plus
+`cargo clippy --all-targets` must both come back clean.
