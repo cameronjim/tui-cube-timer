@@ -22,18 +22,20 @@ style, so 12.349 shows as `12.34`.
 
 The stats strip reads in three rows, and the first and last say which is which:
 `current` labels your rolling `mo3 ao5 ao12 ao100 ao1000`, and `best` labels the
-same five windows at the best you have ever done them. The middle row, between
-the two, is `best single worst single mean solves` for the session you are in. It
-carries no label of its own but is still indented to the same column, so all
-three rows start their numbers in the same place and a rolling average sits
-directly above its personal best. The middle row's figures cover the current
-session only and ignore DNFs, and its two singles are spelled out in full,
-`best single` and `worst single`, so neither reads as a row label. The personal
-bests are the best you have ever done across every session of the puzzle you are
-currently on, and the rolling windows behind them are searched within each
-session rather than across the seam between two of them. On a narrow terminal a
-row drops entries from the right rather than wrapping, so the numbers you look at
-most stay put.
+same five windows at the best you have done them this session. The middle row,
+between the two, is `best single worst single mean solves`. It carries no label
+of its own but is still indented to the same column, so all three rows start
+their numbers in the same place and a rolling average sits directly above the
+best that window has been. Its figures ignore DNFs, and its two singles are
+spelled out in full, `best single` and `worst single`, so neither reads as a row
+label.
+
+Every number on the strip describes the session you are in and nothing else. A
+faster time in another session, even another session of the same puzzle, belongs
+to that session and never appears here; switch to it and the whole strip switches
+with you. That is what makes the strip readable beside the times list on the
+right, which shows the same solves. On a narrow terminal a row drops entries from
+the right rather than wrapping, so the numbers you look at most stay put.
 
 ## The trend graph
 
@@ -61,14 +63,17 @@ characters the classic Windows console fonts carry, so it renders as a line
 rather than a row of empty boxes there. On a terminal too small to read it,
 under 44 columns or 16 rows, `/trend` draws nothing at all.
 
-## Beating a personal best
+## Beating a session best
 
-Beating a personal best says so. When a solve is faster than your best ever
-single, or its ao5 beats your best ever ao5, a green `new pb` line appears over
-the digits for five seconds and the result underneath turns green with it. Both
-at once are named on the same line. Only a record you actually beat counts:
-matching one exactly is not beating it, and the first single or ao5 you ever
-record had nothing to beat, so it passes quietly.
+Beating a session best says so. When a solve is faster than the best single of
+the session you are in, or its ao5 beats the session's best ao5, a green
+`new best` line appears over the digits for five seconds and the result
+underneath turns green with it. Both at once are named on the same line. Only a
+record you actually beat counts: matching one exactly is not beating it, and the
+first single or ao5 of a session had nothing to beat, so it passes quietly.
 
-Personal bests are per puzzle and span every session on it, which is part of why
-sessions work the way [sessions.md](sessions.md) describes.
+The banner is scoped the same way the `best` row is, so a record set in another
+session never raises it here and a session that starts fresh celebrates its own
+first improvement rather than measuring you against every solve you have ever
+done. Starting a session is how you draw that line, which is part of why sessions
+work the way [sessions.md](sessions.md) describes.

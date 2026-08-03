@@ -34,8 +34,8 @@ const C_LABEL: Color = Color::DarkGray;
 const C_ACCENT: Color = Color::Magenta;
 const C_BEST: Color = Color::Green;
 const C_WORST: Color = Color::Red;
-/// A personal best just set: the banner over the digits and the digits under it.
-const C_PB: Color = Color::LightGreen;
+/// A session best just set: the banner over the digits and the digits under it.
+const C_NEW_BEST: Color = Color::LightGreen;
 /// Inspection past eight seconds.
 const C_STAGE1: Color = Color::LightMagenta;
 /// Inspection past twelve seconds.
@@ -174,7 +174,7 @@ fn draw_body(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-// ------------------------------------------------- stats + personal bests
+// -------------------------------------------------- stats + session bests
 
 fn opt_time(v: Option<u64>) -> String {
     v.map(format_millis).unwrap_or_else(|| "-".to_string())
@@ -221,11 +221,11 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let st = &app.stats;
-    let pb = &app.pbs;
+    let best = &app.bests;
     let width = inner.width;
 
     // The first and last rows carry the same five windows, so a rolling average sits directly
-    // above the best that window has ever been. The session's own spread goes between them.
+    // above the best that window has been this session. The session's own spread goes between.
     let averages = stat_row(
         "current",
         vec![
@@ -255,11 +255,11 @@ fn draw_stats(frame: &mut Frame, app: &App, area: Rect) {
     let bests = stat_row(
         "best",
         vec![
-            ("mo3", opt_time(pb.mo3), C_ACCENT),
-            ("ao5", opt_time(pb.ao5), C_ACCENT),
-            ("ao12", opt_time(pb.ao12), C_ACCENT),
-            ("ao100", opt_time(pb.ao100), C_ACCENT),
-            ("ao1000", opt_time(pb.ao1000), C_ACCENT),
+            ("mo3", opt_time(best.mo3), C_ACCENT),
+            ("ao5", opt_time(best.ao5), C_ACCENT),
+            ("ao12", opt_time(best.ao12), C_ACCENT),
+            ("ao100", opt_time(best.ao100), C_ACCENT),
+            ("ao1000", opt_time(best.ao1000), C_ACCENT),
         ],
         width,
     );
@@ -671,7 +671,7 @@ mod tests {
         );
         assert!(
             !bests.contains("single"),
-            "the personal bests row is averages only: {:?}",
+            "the session bests row is averages only: {:?}",
             bests
         );
         assert!(
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(
             first,
             label_col(&bests, "mo3"),
-            "and the PB of a window sits under the rolling one"
+            "and the session best of a window sits under the rolling one"
         );
     }
 
@@ -722,6 +722,38 @@ mod tests {
                 "best    mo3 8.50",
             ],
             "at 44 columns every row is down to the one entry it may never drop"
+        );
+    }
+
+    #[test]
+    fn the_best_row_describes_the_active_session_and_no_other() {
+        use crate::types::{Session, Solve, FIRST_USER_ID};
+
+        let app = app_with(Puzzle::Cube3, 30);
+        let alone = stats_lines(&app, 80, 30);
+
+        // A second 3x3 session of five second solves, the shape a csTimer import leaves behind.
+        let mut save = app.save.clone();
+        save.sessions.push(Session {
+            id: FIRST_USER_ID,
+            name: "imported".to_string(),
+            puzzle: Puzzle::Cube3,
+            solves: (0..30)
+                .map(|i| Solve {
+                    millis: 5_000 + i,
+                    penalty: Penalty::None,
+                    scramble: "R U R' U'".to_string(),
+                    timestamp: 1_700_000_000_000 + i,
+                })
+                .collect(),
+            created_at: 0,
+        });
+        let sibling = App::new(save, app.data_path.clone());
+
+        assert_eq!(
+            stats_lines(&sibling, 80, 30),
+            alone,
+            "a faster session of the same puzzle is another context, not this row's business"
         );
     }
 

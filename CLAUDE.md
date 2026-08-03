@@ -3,7 +3,7 @@
 Cubetimer is a speedcube timer that runs in the terminal: scrambles in WCA notation for
 twelve events (2x2 through 7x7, Pyraminx, Skewb, Megaminx, Square-1, Clock, 3x3 one-handed),
 optional 15 second inspection with the 8 and 12 second judge calls, mo3 through ao1000,
-personal bests and sessions persisted as JSON, and csTimer import and export. It is
+session bests and sessions persisted as JSON, and csTimer import and export. It is
 written in Rust on top of ratatui and crossterm, and it is Windows-first, because the
 hold-and-release timer flow depends on key release events that the Windows console
 delivers natively.
@@ -35,7 +35,7 @@ single jobs:
 | `app/` | State machine: timer states, key handling, `/commands`, and the derived fields the UI reads |
 | `ui/` | Rendering only: turns `App` fields into ratatui widgets, mutates nothing |
 | `scramble/` | Scramble generation in WCA notation, one generator per puzzle family |
-| `stats.rs` | Pure statistics: trimmed averages, session summaries, personal bests |
+| `stats.rs` | Pure statistics: trimmed averages, session summaries, session bests |
 | `cstimer.rs` | Pure conversion to and from csTimer's export format; no file IO, the commands do that |
 | `storage.rs` | Where the save file lives, and reading and writing it atomically |
 | `types.rs` | Shared vocabulary and the serde shape of the persisted file |
@@ -47,7 +47,7 @@ Three of those are directories, each split along its own internal seam:
 | `app/mod.rs` | Timer state machine, key handling, tick, the derived fields the UI reads |
 | `app/commands.rs` | Command mode: the `/command` parser and every `cmd_*` handler |
 | `app/selection.rs` | Overlay state: the times cursor, the solve detail, the sessions picker, the help and trend toggles |
-| `app/progress.rs` | How the session is going: the trend window and the personal-best celebration |
+| `app/progress.rs` | How the session is going: the trend window and the session-best celebration |
 | `app/repair.rs` | Save-file structural repair: `sanitize` and the id bookkeeping under it |
 | `app/testkit.rs` | Test scaffolding shared by the five, `#[cfg(test)]` only |
 | `ui/mod.rs` | `draw`, the header, the stats strip, the times list and the status line |
@@ -66,7 +66,7 @@ of `app`: `crate::app::App` keeps every path it had before the directory split, 
 `main.rs` and `ui` are unaware there is more than one file behind it.
 
 Files stay small: past roughly 500 lines of non-test code, split along responsibility lines
-rather than appending. Nothing in `src/` is over the line, but `app/mod.rs` sits at 493
+rather than appending. Nothing in `src/` is over the line, but `app/mod.rs` sits at 492
 non-test lines with nothing to spare, so the next thing added to the state machine needs a
 cut first, not after. **The seam waiting there is the inspection cluster**: the five
 `INSPECTION_*` constants with `start_inspection`, `cancel_inspection`, `refresh_inspection`
@@ -76,7 +76,7 @@ vocabulary. Below it are `app/commands.rs` at 432, `ui/overlay.rs` at 391,
 obvious seam left, so treat growth past roughly 500 in any of them as the prompt to look
 for one. `app/progress.rs` is the most
 recent cut and it shows the shape to aim for, as `app/selection.rs` and `ui/timer.rs` did
-before it: the parent keeps one entry point per cluster (`note_pb`, `expire_pb_banner`,
+before it: the parent keeps one entry point per cluster (`note_best`, `expire_best_banner`,
 `on_key_times`, `draw_timer`) and the child keeps every constant and helper behind it.
 
 **3. Comments are single-line, always.** Never `/* */` blocks. Use `///` doc comments on
