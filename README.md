@@ -29,25 +29,34 @@ and setup in [docs/getting-started.md](docs/getting-started.md).
 
 ## Quick start
 
+Install two free tools first:
+
+1. **The Rust toolchain**, through [rustup](https://rustup.rs). This provides
+   `cargo`, which builds the program and fetches everything it needs. On
+   Windows, take the default (MSVC) flavour and let it install what it asks for.
+2. **Git**, to fetch the code, or use the ZIP download on GitHub instead.
+
+Then build:
+
 ```
 git clone https://github.com/cameronjim/tui-cube-timer.git
 cd tui-cube-timer
 cargo build --release
 ```
 
-The finished program lands at `target\release\cubetimer.exe`, and you can run it
-from there using:
+The first build fetches and compiles the libraries, once; after that it takes
+seconds. The finished program lands at `target\release\cubetimer.exe`, and you
+can run it from there using:
 ```
 target\release\cubetimer.exe
 ```
-or drop that one file anywhere on your PATH and run using:
-from there using:
+or drop that one file anywhere on your PATH and run it with:
 ```
 cubetimer
 ```
-[docs/getting-started.md](docs/getting-started.md) walks the same route from a
-bare machine: installing Rust, choosing a toolchain flavour, and what cargo
-fetches on that first build.
+[docs/getting-started.md](docs/getting-started.md) has the longer version:
+toolchain flavours, what cargo fetches on that first build, and which terminals
+work best.
 
 ## Keys
 
